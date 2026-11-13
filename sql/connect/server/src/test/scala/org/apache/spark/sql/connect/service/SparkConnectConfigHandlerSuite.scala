@@ -267,6 +267,19 @@ class SparkConnectConfigHandlerSuite extends SharedSparkSession {
     }
   }
 
+  test("a silent Set of a static config to its current value reports no warning") {
+    val sessionHolder = SparkConnectTestUtils.createDummySessionHolder(spark)
+    val key = StaticSQLConf.CATALOG_IMPLEMENTATION.key
+    val current = spark.conf.get(key)
+    assert(sendSet(sessionHolder, key, current, silent = true).getWarningsCount === 0)
+
+    val other = if (current == "hive") "in-memory" else "hive"
+    val response = sendSet(sessionHolder, key, other, silent = true)
+    assert(response.getWarningsCount === 1)
+    assert(response.getWarnings(0) === s"Failed to set $key (CANNOT_MODIFY_STATIC_CONFIG)")
+    assert(spark.conf.get(key) === current)
+  }
+
   test("SPARK-58752: Unset is not validated, so a session can leave an invalid environment") {
     val sessionHolder = SparkConnectTestUtils.createDummySessionHolder(spark)
     val key = envKey("1INVALID")
