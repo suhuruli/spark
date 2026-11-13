@@ -26,7 +26,7 @@ import scala.reflect.ClassTag
 import org.apache.spark.{SparkConf, SparkException, SparkRuntimeException}
 import org.apache.spark.sql.{AnalysisException, DataFrame, Row, SaveMode, SessionQueryTest, SparkSession}
 import org.apache.spark.sql.QueryTest.withQueryExecutionsCaptured
-import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.{InternalRow, TableIdentifier}
 import org.apache.spark.sql.catalyst.analysis.TableAlreadyExistsException
 import org.apache.spark.sql.catalyst.plans.logical.{AppendData, CreateTableAsSelect, LogicalPlan, ReplaceTableAsSelect}
 import org.apache.spark.sql.connector.catalog.{BasicInMemoryTableCatalog, CachingInMemoryTableCatalog, CatalogV2Util, Column, ColumnDefaultValue, DefaultValue, GenerationExpression, Identifier, InMemoryBaseTable, InMemoryTableCatalog, MixedColumnIdTableCatalog, NullColumnIdInMemoryTableCatalog, NullTableIdAndNullColumnIdInMemoryTableCatalog, NullTableIdInMemoryTableCatalog, SupportsV1OverwriteWithSaveAsTable, TableCatalog, TableInfo, TypeChangeResetsColIdTableCatalog}
@@ -132,6 +132,20 @@ class DataSourceV2DataFrameSuite
       spark.table(t1).write.insertInto(t2)
       checkInsertMetrics(t2, numInsertedRows = 3)
       checkAnswer(spark.table(t2), df)
+    }
+  }
+
+  test("saveAsTable and insertInto: session catalog table while another catalog is current") {
+    val t = "spark_catalog.default.tbl"
+    withTable(t) {
+      sql("USE testcat")
+      val df = Seq((1L, "a"), (2L, "b")).toDF("id", "data")
+      df.write.format("parquet").saveAsTable(t)
+      df.write.insertInto(t)
+      df.write.mode("append").saveAsTable(t)
+      assert(spark.sessionState.catalogManager.currentCatalog.name() == "testcat")
+      assert(spark.sessionState.catalog.tableExists(TableIdentifier("tbl", Some("default"))))
+      checkAnswer(spark.table(t), df.union(df).union(df))
     }
   }
 

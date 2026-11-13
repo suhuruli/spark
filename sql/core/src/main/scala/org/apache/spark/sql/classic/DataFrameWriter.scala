@@ -352,6 +352,12 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) extends sql.DataFram
 
       case AsTableIdentifier(tableIdentifier) =>
         insertIntoCommand(tableIdentifier)
+
+      // The name explicitly refers to the session catalog while another catalog is the current
+      // one, e.g. `spark_catalog.db.tbl` after `USE other_catalog`.
+      case SessionCatalogAndIdentifier(catalog, ident) if ident.namespace().length == 1 =>
+        insertIntoCommand(ident.asTableIdentifierOpt(Some(catalog.name())).get)
+
       case other =>
         throw QueryCompilationErrors.cannotFindCatalogToHandleIdentifierError(other.quoted)
     }
@@ -480,6 +486,12 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) extends sql.DataFram
       case AsTableIdentifier(tableIdentifier) =>
         assertSchemaEvolutionNotEnabledForV1Write()
         saveAsV1TableCommand(tableIdentifier)
+
+      // The name explicitly refers to the session catalog while another catalog is the current
+      // one, e.g. `spark_catalog.db.tbl` after `USE other_catalog`.
+      case SessionCatalogAndIdentifier(catalog, ident) if ident.namespace().length == 1 =>
+        assertSchemaEvolutionNotEnabledForV1Write()
+        saveAsV1TableCommand(ident.asTableIdentifierOpt(Some(catalog.name())).get)
 
       case other =>
         throw QueryCompilationErrors.cannotFindCatalogToHandleIdentifierError(other.quoted)
