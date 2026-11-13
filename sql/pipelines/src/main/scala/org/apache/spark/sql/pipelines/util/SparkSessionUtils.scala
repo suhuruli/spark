@@ -24,10 +24,14 @@ object SparkSessionUtils {
   /**
    * Sets all SQL configurations specified in `pairs`, calls `f`, and then restores all SQL
    * configurations.
+   *
+   * Configurations that already have the requested value are left untouched. This allows `pairs`
+   * to contain configurations that cannot be modified at runtime, such as static SQL
+   * configurations listed in a pipeline spec, as long as the session was started with them.
    */
   def withSqlConf[T](spark: SparkSession, pairs: (String, String)*)(f: => T): T = {
     val conf = spark.conf
-    val (keys, values) = pairs.unzip
+    val (keys, values) = pairs.filterNot { case (k, v) => conf.getOption(k).contains(v) }.unzip
     val currentValues = keys.map(conf.getOption)
     keys.lazyZip(values).foreach((k, v) => conf.set(k, v))
     try f
