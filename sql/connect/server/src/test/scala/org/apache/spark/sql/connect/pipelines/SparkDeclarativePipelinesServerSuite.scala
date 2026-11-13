@@ -21,17 +21,24 @@ import java.util.UUID
 
 import scala.jdk.CollectionConverters._
 
+import org.apache.spark.SparkConf
 import org.apache.spark.connect.proto
 import org.apache.spark.connect.proto.{Expression, OutputType, PipelineCommand, PipelineCommandResult, Relation, UnresolvedTableValuedFunction}
 import org.apache.spark.connect.proto.PipelineCommand.{DefineFlow, DefineOutput}
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.connect.service.{SessionKey, SparkConnectService}
+import org.apache.spark.sql.connector.catalog.InMemoryTableCatalog
 import org.apache.spark.sql.pipelines.autocdc.{ColumnSelection, UnqualifiedColumnName}
 import org.apache.spark.sql.pipelines.graph.AutoCdcFlow
 
 class SparkDeclarativePipelinesServerSuite
     extends SparkDeclarativePipelinesServerTest
     with Logging {
+
+  // A V2 catalog without a default namespace, like the catalogs of an open-source Unity Catalog
+  // server.
+  override def sparkConf: SparkConf = super.sparkConf
+    .set("spark.sql.catalog.v2_catalog", classOf[InMemoryTableCatalog].getName)
 
   private def sessionCaseSensitive: Boolean = spark.sessionState.conf.caseSensitiveAnalysis
 
@@ -53,6 +60,50 @@ class SparkDeclarativePipelinesServerSuite
       val definition =
         getDefaultSessionHolder.dataflowGraphRegistry.getDataflowGraphOrThrow(graphId)
       assert(definition.defaultDatabase == "test_db")
+    }
+  }
+
+  test("create dataflow graph resolves the default database in the default catalog") {
+    withRawBlockingStub { implicit stub =>
+      // The in-memory catalog is per session, so create the namespace in the Connect session.
+      sendPlan(buildSqlCommandPlan("CREATE NAMESPACE v2_catalog.v2_db"))
+      sendPlan(buildSqlCommandPlan("USE v2_catalog.v2_db"))
+      try {
+        val graphId = sendPlan(
+          buildCreateDataflowGraphPlan(
+            proto.PipelineCommand.CreateDataflowGraph
+              .newBuilder()
+              .setDefaultCatalog("spark_catalog")
+              .build())).getPipelineCommandResult.getCreateDataflowGraphResult.getDataflowGraphId
+        val definition =
+          getDefaultSessionHolder.dataflowGraphRegistry.getDataflowGraphOrThrow(graphId)
+        // The current namespace of `v2_catalog` must not leak into `spark_catalog`.
+        assert(definition.defaultCatalog == "spark_catalog")
+        assert(definition.defaultDatabase == "default")
+      } finally {
+        sendPlan(buildSqlCommandPlan("DROP NAMESPACE IF EXISTS v2_catalog.v2_db"))
+      }
+    }
+  }
+
+  test("create dataflow graph requires a default database if the catalog has no namespace") {
+    withRawBlockingStub { implicit stub =>
+      sql("CREATE DATABASE IF NOT EXISTS test_db")
+      sendPlan(buildSqlCommandPlan("USE DATABASE test_db"))
+      try {
+        val ex = intercept[Exception] {
+          sendPlan(
+            buildCreateDataflowGraphPlan(
+              proto.PipelineCommand.CreateDataflowGraph
+                .newBuilder()
+                .setDefaultCatalog("v2_catalog")
+                .build()))
+        }
+        assert(ex.getMessage.contains("PIPELINE_DEFAULT_SCHEMA_NOT_SPECIFIED"))
+        assert(ex.getMessage.contains("`v2_catalog`"))
+      } finally {
+        sql("DROP DATABASE IF EXISTS test_db")
+      }
     }
   }
 

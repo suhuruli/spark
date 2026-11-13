@@ -7259,6 +7259,12 @@
     ],
     "sqlState" : "0A000"
   },
+  "PIPELINE_DEFAULT_SCHEMA_NOT_SPECIFIED" : {
+    "message" : [
+      "The pipeline does not specify a default schema, and its default catalog <catalog> does not have a default namespace. Set `schema` (or `database`) in the pipeline spec."
+    ],
+    "sqlState" : "3F000"
+  },
   "PIPELINE_DUPLICATE_IDENTIFIERS" : {
     "message" : [
       "A duplicate identifier was found for elements registered in the pipeline's dataflow graph."

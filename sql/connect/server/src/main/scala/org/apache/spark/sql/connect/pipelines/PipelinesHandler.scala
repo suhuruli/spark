@@ -32,6 +32,7 @@ import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.analysis.{PlanWithUnresolvedIdentifier, UnresolvedAttribute, UnresolvedExecuteImmediate, UnresolvedRelation}
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.plans.logical.{Command, CreateNamespace, CreateTable, CreateTableAsSelect, CreateView, DescribeRelation, DescribeTablePartition, DropView, ExecutableDuringAnalysis, InsertIntoDir, InsertIntoStatement, LogicalPlan, RenameTable, ShowColumns, ShowCreateTable, ShowFunctions, ShowTableProperties, ShowTables, ShowViews, Union, UnresolvedInsert, UnresolvedWith}
+import org.apache.spark.sql.catalyst.util.QuotingUtils
 import org.apache.spark.sql.classic.ClassicConversions._
 import org.apache.spark.sql.connect.common.DataTypeProtoConverter
 import org.apache.spark.sql.connect.service.SessionHolder
@@ -216,9 +217,19 @@ private[connect] object PipelinesHandler extends Logging {
         currentCatalog
       }
 
+    // Switch to the default catalog before resolving the default database, so that a missing
+    // default database falls back to the current namespace of the pipeline's default catalog
+    // rather than to the current database of the previously active catalog.
+    sessionHolder.session.catalog.setCurrentCatalog(defaultCatalog)
+
     val defaultDatabase = Option
       .when(cmd.hasDefaultDatabase)(cmd.getDefaultDatabase)
       .getOrElse {
+        if (sessionHolder.session.sessionState.catalogManager.currentNamespace.isEmpty) {
+          throw new AnalysisException(
+            "PIPELINE_DEFAULT_SCHEMA_NOT_SPECIFIED",
+            Map("catalog" -> QuotingUtils.quoteIdentifier(defaultCatalog)))
+        }
         val currentDatabase = sessionHolder.session.catalog.currentDatabase
         logInfo(
           "No default database was supplied. " +
@@ -228,7 +239,6 @@ private[connect] object PipelinesHandler extends Logging {
 
     val defaultSqlConf = cmd.getSqlConfMap.asScala.toMap
 
-    sessionHolder.session.catalog.setCurrentCatalog(defaultCatalog)
     sessionHolder.session.catalog.setCurrentDatabase(defaultDatabase)
 
     sessionHolder.dataflowGraphRegistry.createDataflowGraph(
