@@ -59,7 +59,7 @@ class GraphRegistrationContext(
   }
 
   def registerFlow(flowDef: UnresolvedFlow): Unit = {
-    flows += flowDef.withSqlConf(defaultSqlConf ++ flowDef.sqlConf)
+    flows += flowDef
   }
 
   private def isEmpty: Boolean = {
@@ -86,8 +86,21 @@ class GraphRegistrationContext(
       tables = tables.toSeq,
       views = views.toSeq,
       sinks = sinks.toSeq,
-      flows = flows.toSeq
+      flows = flowsWithMergedSqlConf
     )
+  }
+
+  /**
+   * Returns the registered flows with their SQL confs merged with the pipeline's default SQL confs
+   * and the SQL confs of their destination table. Confs set on a flow take precedence over confs
+   * set on its destination table, which take precedence over the pipeline's default confs.
+   */
+  private def flowsWithMergedSqlConf: Seq[UnresolvedFlow] = {
+    val tableSqlConfs = tables.map(t => t.identifier -> t.sqlConf).toMap
+    flows.toSeq.map { flow =>
+      val tableSqlConf = tableSqlConfs.getOrElse(flow.destinationIdentifier, Map.empty)
+      flow.withSqlConf(defaultSqlConf ++ tableSqlConf ++ flow.sqlConf)
+    }
   }
 
   private def assertNoDuplicates(

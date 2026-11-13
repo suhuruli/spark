@@ -112,7 +112,9 @@ class SqlGraphRegistrationContext(
   private val context = new SqlGraphRegistrationContextState(
     initialCatalogOpt = Option(defaultCatalog),
     initialDatabaseOpt = Option(defaultDatabase),
-    initialSqlConf = graphRegistrationContext.defaultSqlConf
+    // The pipeline's default SQL confs are applied by `GraphRegistrationContext` when the graph is
+    // constructed, so only confs explicitly set in this file are tracked here.
+    initialSqlConf = Map.empty
   )
 
   def processSqlFile(sqlText: String, sqlFilePath: String, spark: SparkSession): Unit = {
@@ -210,7 +212,8 @@ class SqlGraphRegistrationContext(
           ),
           format = cst.tableSpec.provider,
           normalizedPath = None,
-          isStreamingTable = true
+          isStreamingTable = true,
+          sqlConf = context.getSqlConf
         )
       )
     }
@@ -245,7 +248,8 @@ class SqlGraphRegistrationContext(
           ),
           format = cst.tableSpec.provider,
           normalizedPath = None,
-          isStreamingTable = true
+          isStreamingTable = true,
+          sqlConf = context.getSqlConf
         )
       )
 
@@ -422,7 +426,8 @@ class SqlGraphRegistrationContext(
           ),
           format = cst.tableSpec.provider,
           normalizedPath = None,
-          isStreamingTable = true
+          isStreamingTable = true,
+          sqlConf = context.getSqlConf
         )
       )
 
@@ -490,7 +495,8 @@ class SqlGraphRegistrationContext(
           ),
           format = cmv.tableSpec.provider,
           normalizedPath = None,
-          isStreamingTable = false
+          isStreamingTable = false,
+          sqlConf = context.getSqlConf
         )
       )
 

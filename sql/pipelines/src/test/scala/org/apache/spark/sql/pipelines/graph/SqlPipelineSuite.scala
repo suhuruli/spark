@@ -422,6 +422,51 @@ class SqlPipelineSuite extends PipelineTest with SharedSparkSession {
     )
   }
 
+  test("Spark confs set before a dataset definition are applied to flows in other files") {
+    val unresolvedDataflowGraph = unresolvedDataflowGraphFromSqlFiles(
+      sqlFiles = Seq(
+        TestSqlFile(
+          sqlText =
+            """
+              |SET conf.dataset = st_value;
+              |SET conf.shared = st_value;
+              |CREATE STREAMING TABLE st;
+              |""".stripMargin,
+          sqlFilePath = "file1.sql"
+        ),
+        TestSqlFile(
+          sqlText =
+            """
+              |SET conf.shared = flow_value;
+              |SET conf.flow = flow_value;
+              |CREATE FLOW f AS INSERT INTO st BY NAME SELECT * FROM STREAM range(1, 2);
+              |""".stripMargin,
+          sqlFilePath = "file2.sql"
+        )
+      )
+    )
+
+    assert(
+      unresolvedDataflowGraph.table(fullyQualifiedIdentifier("st")).sqlConf == Map(
+        "conf.dataset" -> "st_value",
+        "conf.shared" -> "st_value"
+      )
+    )
+
+    // Flow-level confs take precedence over dataset-level confs.
+    val resolvedDataflowGraph = resolveGraph(unresolvedDataflowGraph)
+    assert(
+      resolvedDataflowGraph.flows
+        .find(_.identifier == fullyQualifiedIdentifier("f"))
+        .head
+        .sqlConf == Map(
+        "conf.dataset" -> "st_value",
+        "conf.shared" -> "flow_value",
+        "conf.flow" -> "flow_value"
+      )
+    )
+  }
+
   test("Setting dataset location is disallowed") {
     val graphRegistrationContext = new TestGraphRegistrationContext(spark)
     val sqlGraphRegistrationContext = new SqlGraphRegistrationContext(graphRegistrationContext)

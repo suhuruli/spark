@@ -113,6 +113,9 @@ sealed trait TableElement extends GraphElement {
  * @param properties Table Properties to set in table metadata.
  * @param comment User-specified comment that can be placed on the table.
  * @param isStreamingTable if the table is a streaming table, as defined by the source code.
+ * @param format The format of the table, if specified.
+ * @param sqlConf SQL configurations set when the table was defined. These are applied to every
+ *                flow that writes to this table, with lower precedence than the flow's own confs.
  */
 case class Table(
     identifier: TableIdentifier,
@@ -124,7 +127,8 @@ case class Table(
     comment: Option[String],
     override val origin: QueryOrigin,
     isStreamingTable: Boolean,
-    format: Option[String]
+    format: Option[String],
+    sqlConf: Map[String, String] = Map.empty
 ) extends TableElement
     with Dataset {
 
