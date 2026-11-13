@@ -137,6 +137,8 @@ If no refresh options are specified, a default incremental update is performed. 
 - `--full-refresh-all` cannot be combined with `--full-refresh` or `--refresh`
 - `--full-refresh` and `--refresh` can be used together to specify different behaviors for different datasets
 
+When `--full-refresh` or `--refresh` is used, only the listed datasets are updated. All other datasets, including datasets downstream of the listed ones, are skipped for that run and keep their current contents. See [How Datasets are Stored and Refreshed](#how-datasets-are-stored-and-refreshed) for what each option does to each type of dataset.
+
 #### Examples
 
 ```bash
@@ -161,14 +163,73 @@ spark-pipelines run --remote sc://my-cluster:15002
 
 ### `spark-pipelines dry-run`
 
-`spark-pipelines dry-run` launches an execution of a pipeline that doesn't write or read any data, but catches many kinds of errors that would be caught if the pipeline were to actually run. E.g.
+`spark-pipelines dry-run` loads the pipeline's source files, registers its datasets and flows, and then resolves, analyzes, and validates the dataflow graph. It doesn't execute any flows: it doesn't create or modify tables, write data, or create streaming checkpoints. It catches many kinds of errors that would be caught if the pipeline were to actually run. E.g.
 - Syntax errors – e.g. invalid Python or SQL code
 - Analysis errors – e.g. selecting from a table or a column that doesn't exist
-- Graph validation errors - e.g. cyclic dependencies
+- Graph validation errors - e.g. cyclic dependencies, or a streaming table defined by a batch query
+
+Errors that only occur while flows execute are not caught by a dry run, e.g. malformed input records, an unreachable source or sink, or a conflict with existing data in the target table's location. Analysis can still read source metadata, e.g. to infer the schema of input files.
+
+Both `spark-pipelines run` and `spark-pipelines dry-run` exit with a non-zero status if the pipeline fails.
 
 Since `spark-pipelines` is built on top of `spark-submit`, it supports all `spark-submit` arguments except for `--class`. For the complete list of available parameters, see the [Spark Submit documentation](https://spark.apache.org/docs/latest/submitting-applications.html#launching-applications-with-spark-submit).
 
 It also supports the pipeline-specific `--spec` parameter (see description above in the `run` section).
+
+## How Datasets are Stored and Refreshed
+
+### Storage
+
+Materialized views and streaming tables are stored as tables in the pipeline's target catalog and database. Temporary views are not stored.
+
+By default, tables are created with Spark's default data source, which is configured by `spark.sql.sources.default` (`parquet` unless changed). You can choose a different format with the `format` argument in Python or a `USING` clause in SQL. Any format available in your Spark environment can be used.
+
+```python
+@dp.materialized_view(format="orc")
+def orc_mv() -> DataFrame:
+    return spark.read.table("source_table")
+```
+
+```sql
+CREATE MATERIALIZED VIEW json_mv USING json
+AS SELECT * FROM source_table;
+```
+
+The pipeline's state persists across runs only if both of the following persist:
+- **The catalog**. When `spark-pipelines` starts a local Spark session, it uses Spark's default in-memory catalog unless configured otherwise, so table definitions are lost when the run ends while the table files remain in the warehouse directory (`spark.sql.warehouse.dir`, by default `spark-warehouse` in the current directory). A second run against the same warehouse directory then fails with `LOCATION_ALREADY_EXISTS`. To keep tables across local runs, use a persistent catalog, e.g. pass `--conf spark.sql.catalogImplementation=hive` to a Spark distribution with Hive support. `spark.sql.catalogImplementation` is a static configuration, so it must be passed with `--conf` rather than in the spec's `configuration` field.
+- **The storage directory**. Streaming checkpoints are written under the `storage` directory from the pipeline spec, at `<storage>/_checkpoints/<catalog>/<database>/<table>/<flow>/<n>`, where `<n>` starts at `0`. The storage directory can be on any Hadoop-compatible file system, e.g. local file system, HDFS, Amazon S3, Azure ADLS Gen2, or Google Cloud Storage.
+
+### Materialized Views
+
+A materialized view is recomputed from scratch on every run that updates it: SDP truncates the table and writes the full result of its query. Because the whole result is recomputed, a materialized view always reflects the current contents of its sources, including rows that were updated or deleted.
+
+### Streaming Tables
+
+A streaming table is updated incrementally. Each streaming flow that writes to it is a Structured Streaming query with its own checkpoint, so each run processes only the input that arrived since the previous run and appends it to the existing rows. Rows already in the table are kept even if they are later removed from the source. If the query's schema changes, new columns are merged into the table's existing schema.
+
+### Effect of Refresh Options
+
+The following table shows what each `spark-pipelines run` refresh option does to each type of dataset.
+
+| Option | Materialized view | Streaming table |
+|---|---|---|
+| No refresh options | Recomputed from scratch. | Processes new input since the last run and appends it. |
+| `--refresh` | If listed, recomputed from scratch. Otherwise not updated. | If listed, processes new input and appends it. Otherwise not updated. |
+| `--full-refresh` | If listed, recomputed from scratch. Otherwise not updated. | If listed, truncated and rebuilt from all input currently available in its sources, using a new checkpoint. Otherwise not updated. |
+| `--full-refresh-all` | Recomputed from scratch. | Truncated and rebuilt from all input currently available in its sources, using a new checkpoint. |
+
+A full refresh of a streaming table starts each of its flows from a new checkpoint directory, `<n+1>`, so the flow reprocesses its sources from the beginning. Data that is no longer available in a source, e.g. Kafka records past their retention period, is lost from the table. Previous checkpoint directories are left in place.
+
+### Choosing Between Materialized Views and Streaming Tables
+
+The type of a dataset determines which kind of query defines it:
+
+| Dataset | Python | SQL | Query | Use it for |
+|---|---|---|---|---|
+| Materialized view | `@dp.materialized_view` | `CREATE MATERIALIZED VIEW` | Batch read, e.g. `spark.read`, `spark.table(...)`, `FROM t` | Aggregations, joins, and other results that should be recomputed from the current state of their sources. |
+| Streaming table | `@dp.table` | `CREATE STREAMING TABLE` | Streaming read, e.g. `spark.readStream`, `FROM STREAM t` | Ingesting append-only sources and transformations where each input row is processed once. |
+
+Defining a streaming table with a batch query fails with `INVALID_FLOW_QUERY_TYPE.BATCH_RELATION_FOR_STREAMING_TABLE`, and defining a materialized view with a streaming query fails with `INVALID_FLOW_QUERY_TYPE.STREAMING_RELATION_FOR_MATERIALIZED_VIEW`. A materialized view can read a streaming table with a batch read, which reads the table's current contents.
 
 ## Programming with SDP in Python
 
@@ -347,6 +408,36 @@ def daily_orders_by_state() -> DataFrame:
         .withColumnRenamed("count", "order_count")
     )
 ```
+
+### How Dependencies Between Datasets are Inferred in Python
+
+SDP infers the dependencies between datasets from the reads inside each dataset's query function. Read another dataset of the pipeline by name:
+
+- `spark.table("name")` or `spark.read.table("name")` for a batch read, e.g. in a materialized view.
+- `spark.readStream.table("name")` for a streaming read, e.g. in a streaming table.
+
+The upstream dataset can be defined later in the same file or in another file of the pipeline, and it doesn't need to exist in the catalog before the run. SDP orders the execution of flows based on these reads.
+
+The query function is evaluated while SDP builds the dataflow graph, before any dataset is created. Reading a pipeline dataset outside of a query function and triggering analysis there, e.g. with `df.schema`, `df.columns`, or `df.collect()` at module level, fails with `TABLE_OR_VIEW_NOT_FOUND` because the dataset doesn't exist yet. Inside a query function, such operations fail with `ATTEMPT_ANALYSIS_IN_PIPELINE_QUERY_FUNCTION`. Keep all reads of pipeline datasets inside query functions and return the DataFrame without analyzing it.
+
+```python
+from pyspark import pipelines as dp
+from pyspark.sql import DataFrame
+
+@dp.materialized_view
+def bronze() -> DataFrame:
+    return spark.read.option("header", True).csv("/data/raw.csv")
+
+# Incorrect: analyzes `bronze` before it exists, fails with TABLE_OR_VIEW_NOT_FOUND.
+# bronze_columns = spark.read.table("bronze").columns
+
+@dp.materialized_view
+def silver() -> DataFrame:
+    # Correct: read the upstream dataset by name inside the query function.
+    return spark.read.table("bronze").dropDuplicates()
+```
+
+`TABLE_OR_VIEW_NOT_FOUND` for an upstream dataset is also raised when the file that defines it is not matched by the `libraries` globs in the pipeline spec, or when the name doesn't match the dataset's name, including its catalog and database.
 
 ### Creating Tables in For Loop in Python
 
@@ -1123,6 +1214,58 @@ When working with sinks, keep the following considerations in mind:
 - **Streaming-only**: Sinks currently support only streaming queries through `append_flow` decorators
 - **Python API**: Sink functionality is available only through the Python API, not SQL
 - **Append-only**: Only append operations are supported; full refresh updates reset checkpoints but do not clean previously computed results
+
+## Testing Pipelines Locally and in CI
+
+A pipeline can be tested on a single machine with the `spark-pipelines` CLI, which starts a local Spark session by default.
+
+1. Run `spark-pipelines dry-run` on every change to catch syntax, analysis, and graph validation errors without processing any data.
+2. Run the pipeline end to end against small fixture data, using a separate spec file whose `storage` points to a temporary directory. Pass input locations to the pipeline through the spec's `configuration` field and read them with `spark.conf.get(...)` in your definitions, so tests and production can share the same source files.
+3. Read the output tables and compare them with the expected results.
+
+For example, a test spec `spark-pipeline-test.yml`:
+
+```yaml
+name: my_pipeline_test
+libraries:
+  - glob:
+      include: transformations/**
+storage: file:///tmp/my_pipeline_test/storage
+configuration:
+  my_pipeline.input_path: /path/to/tests/fixtures/orders
+```
+
+A definition that reads its input location from the configuration:
+
+```python
+@dp.materialized_view
+def orders() -> DataFrame:
+    return spark.read.option("header", True).csv(spark.conf.get("my_pipeline.input_path"))
+```
+
+The commands to run in CI:
+
+```bash
+rm -rf /tmp/my_pipeline_test
+spark-pipelines dry-run --spec spark-pipeline-test.yml
+spark-pipelines run --spec spark-pipeline-test.yml \
+  --conf spark.sql.warehouse.dir=/tmp/my_pipeline_test/warehouse
+python tests/check_outputs.py
+```
+
+Both `spark-pipelines` commands exit with a non-zero status on failure. Because the local session uses an in-memory catalog by default (see [Storage](#storage)), the output tables are read directly from the warehouse directory, where tables in the default database are stored as `<warehouse>/<table>`:
+
+```python
+from pyspark.sql import SparkSession
+from pyspark.testing import assertDataFrameEqual
+
+spark = SparkSession.builder.master("local[1]").getOrCreate()
+actual = spark.read.parquet("/tmp/my_pipeline_test/warehouse/orders_by_state")
+expected = spark.createDataFrame([("CA", 2), ("NY", 1)], "state STRING, count BIGINT")
+assertDataFrameEqual(actual, expected)
+```
+
+Removing the storage and warehouse directories before each test run makes the results independent of previous runs. To test incremental behavior of streaming tables across several runs, keep both directories between runs and use a persistent catalog, as described in [Storage](#storage).
 
 ## Important Considerations
 
