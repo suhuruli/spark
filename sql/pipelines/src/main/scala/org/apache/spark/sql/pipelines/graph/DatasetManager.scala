@@ -29,6 +29,7 @@ import org.apache.spark.sql.classic.SparkSession
 import org.apache.spark.sql.connector.catalog.{
   CatalogV2Util,
   Identifier,
+  StagingTableCatalog,
   SupportsRowLevelOperations,
   Table => V2Table,
   TableCatalog,
@@ -46,6 +47,7 @@ import org.apache.spark.sql.pipelines.util.{
 }
 import org.apache.spark.sql.pipelines.util.SchemaInferenceUtils.diffSchemas
 import org.apache.spark.sql.types.StructType
+import org.apache.spark.util.Utils
 
 /**
  * `DatasetManager` is responsible for materializing tables in the catalog based on the given
@@ -358,8 +360,17 @@ object DatasetManager extends Logging {
     // existing data is wiped and the schema is taken directly from this run's computed schema.
     val isTableIncrementallyUpdated = table.isStreamingTable && !isFullRefresh
 
+    // An existing table that is recomputed from scratch is atomically replaced when its catalog
+    // supports it. Unlike truncating it and evolving its schema in place, replacing it also resets
+    // the table's change history, so that streaming readers starting from scratch (e.g. downstream
+    // flows whose checkpoints are reset by the same full refresh) neither replay nor fail on the
+    // pre-refresh history, as happens with Apache Iceberg tables. It also accepts schema changes
+    // that a catalog cannot apply in place, such as changing a column's type.
+    val replaceExistingTable = existingTableOpt.isDefined && !isTableIncrementallyUpdated &&
+      catalog.isInstanceOf[StagingTableCatalog]
+
     // Wipe the data if we need to
-    if (existingTableOpt.isDefined && !isTableIncrementallyUpdated) {
+    if (existingTableOpt.isDefined && !isTableIncrementallyUpdated && !replaceExistingTable) {
       context.spark.sql(s"TRUNCATE TABLE ${table.identifier.quotedString}")
     }
 
@@ -384,8 +395,16 @@ object DatasetManager extends Logging {
       }
     }
 
-    // Create the table if absent, otherwise evolve it (schema + properties).
+    // Create the table if absent, otherwise replace or evolve it (schema + properties).
     existingTableOpt match {
+      case Some(_) if replaceExistingTable =>
+        replaceTable(
+          catalog = catalog.asInstanceOf[StagingTableCatalog],
+          tableIdentifier = identifier,
+          schema = outputSchema,
+          properties = mergedProperties,
+          transforms = allTransforms
+        )
       case Some(existingTable) =>
         // The sequencing-type check needs the existing target schema (the type is embedded in the
         // target's `_cdc_metadata`), so it runs here, and BEFORE `evolveTable`: `evolveTable`
@@ -634,14 +653,39 @@ object DatasetManager extends Logging {
       schema: StructType,
       properties: Map[String, String],
       transforms: Seq[Transform]): Unit = {
-    catalog.createTable(
-      tableIdentifier,
-      new TableInfo.Builder()
-        .withProperties(properties.asJava)
-        .withColumns(CatalogV2Util.structTypeToV2Columns(schema))
-        .withPartitions(transforms.toArray)
-        .build()
-    )
+    catalog.createTable(tableIdentifier, buildTableInfo(schema, properties, transforms))
+  }
+
+  /**
+   * Atomically replaces the existing table at `identifier` with an empty table that has the given
+   * schema, properties, and partition/cluster transforms.
+   *
+   * @param schema     the schema to replace the table with.
+   * @param properties the table properties to replace the table with.
+   * @param transforms the partition/cluster transforms to replace the table with.
+   */
+  private def replaceTable(
+      catalog: StagingTableCatalog,
+      tableIdentifier: Identifier,
+      schema: StructType,
+      properties: Map[String, String],
+      transforms: Seq[Transform]): Unit = {
+    val stagedTable =
+      catalog.stageReplace(tableIdentifier, buildTableInfo(schema, properties, transforms))
+    Utils.tryWithSafeFinallyAndFailureCallbacks {
+      stagedTable.commitStagedChanges()
+    }(catchBlock = stagedTable.abortStagedChanges())
+  }
+
+  private def buildTableInfo(
+      schema: StructType,
+      properties: Map[String, String],
+      transforms: Seq[Transform]): TableInfo = {
+    new TableInfo.Builder()
+      .withProperties(properties.asJava)
+      .withColumns(CatalogV2Util.structTypeToV2Columns(schema))
+      .withPartitions(transforms.toArray)
+      .build()
   }
 
   /**

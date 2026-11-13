@@ -26,9 +26,12 @@ import org.apache.spark.sql.connector.catalog.{
   CatalogV2Util,
   Identifier,
   InMemoryTableCatalog,
+  StagedTable,
+  StagingInMemoryTableCatalog,
   Table => V2Table,
   TableCatalog,
-  TableChange
+  TableChange,
+  TableInfo
 }
 import org.apache.spark.sql.connector.expressions.{ClusterByTransform, Expressions, FieldReference}
 import org.apache.spark.sql.execution.streaming.runtime.MemoryStream
@@ -1623,6 +1626,116 @@ abstract class MaterializeTablesSuite extends BaseCoreExecutionTest {
       assert(loadTableFromRecordingCatalog("t").properties().get("p.stale") == "old")
     }
   }
+
+  // =============== Table replacement in staging catalogs tests ===============
+
+  private val stagingCatalogName = "staging_cat"
+
+  /**
+   * Registers [[RecordingStagingInMemoryTableCatalog]] under `stagingCatalogName`, creates
+   * `recordingNamespace` in it, runs `body` with the catalog, then tears the registration down.
+   */
+  private def withStagingCatalog(body: RecordingStagingInMemoryTableCatalog => Unit): Unit = {
+    spark.conf.set(
+      s"spark.sql.catalog.$stagingCatalogName",
+      classOf[RecordingStagingInMemoryTableCatalog].getName
+    )
+    try {
+      spark.sql(s"CREATE NAMESPACE IF NOT EXISTS $stagingCatalogName.$recordingNamespace")
+      body(
+        spark.sessionState.catalogManager
+          .catalog(stagingCatalogName)
+          .asInstanceOf[RecordingStagingInMemoryTableCatalog]
+      )
+    } finally {
+      spark.sessionState.catalogManager.reset()
+      spark.sessionState.conf.unsetConf(s"spark.sql.catalog.$stagingCatalogName")
+    }
+  }
+
+  test("a materialized view in a staging catalog is replaced instead of truncated and altered") {
+    withStagingCatalog { catalog =>
+      val identifier = Identifier.of(Array(recordingNamespace), "mv")
+      val tableName = s"$stagingCatalogName.$recordingNamespace.mv"
+      def materializeMv(valueType: String): Unit = materializeGraph(
+        new TestGraphRegistrationContext(spark) {
+          registerMaterializedView(
+            "mv",
+            query = sqlFlowFunc(spark, s"SELECT 1 AS id, CAST(1 AS $valueType) AS value"),
+            properties = Map("p.a" -> "1"),
+            catalog = Option(stagingCatalogName),
+            database = Option(recordingNamespace)
+          )
+        }.resolveToDataflowGraph(),
+        storageRoot = storageRoot
+      )
+
+      materializeMv("INT")
+      assert(catalog.recordedReplaces.isEmpty)
+      spark.sql(s"INSERT INTO $tableName VALUES (1, 1)")
+
+      // A catalog may be unable to change a column's type in place, but replacing the table
+      // applies any schema change.
+      materializeMv("STRING")
+      assert(catalog.recordedReplaces.toSeq == Seq(identifier))
+      assert(catalog.recordedAlters.isEmpty)
+      val table = catalog.loadTable(identifier)
+      assert(
+        table.columns() sameElements CatalogV2Util.structTypeToV2Columns(
+          new StructType().add("id", IntegerType).add("value", StringType))
+      )
+      assert(table.properties().get("p.a") == "1")
+      assert(spark.table(tableName).isEmpty)
+    }
+  }
+
+  test("a streaming table in a staging catalog is evolved in place on an incremental run and " +
+    "replaced on a full refresh") {
+    withStagingCatalog { catalog =>
+      val identifier = Identifier.of(Array(recordingNamespace), "st")
+      val tableName = s"$stagingCatalogName.$recordingNamespace.st"
+      def stGraph(query: String): DataflowGraph =
+        new TestGraphRegistrationContext(spark) {
+          registerTable(
+            "st",
+            query = Option(sqlFlowFunc(spark, query)),
+            catalog = Option(stagingCatalogName),
+            database = Option(recordingNamespace)
+          )
+        }.resolveToDataflowGraph()
+
+      val graph = materializeGraph(stGraph("SELECT 1 AS id"), storageRoot = storageRoot)
+      spark.sql(s"INSERT INTO $tableName VALUES (1)")
+
+      // An incremental run keeps the existing data and evolves the schema in place.
+      materializeGraph(stGraph("SELECT 1 AS id, 'a' AS value"), storageRoot = storageRoot)
+      assert(catalog.recordedReplaces.isEmpty)
+      assert(catalog.recordedAlters.size == 1)
+      assert(spark.table(tableName).count() == 1)
+
+      // A full refresh replaces the table, which also applies the column type change.
+      materializeGraph(
+        stGraph("SELECT 1 AS id, 1 AS value"),
+        contextOpt = Option(
+          TestPipelineUpdateContext(
+            spark = spark,
+            unresolvedGraph = graph,
+            refreshTables = NoTables,
+            fullRefreshTables = AllTables,
+            storageRoot = storageRoot
+          )
+        ),
+        storageRoot = storageRoot
+      )
+      assert(catalog.recordedReplaces.toSeq == Seq(identifier))
+      assert(catalog.recordedAlters.size == 1)
+      assert(
+        catalog.loadTable(identifier).columns() sameElements CatalogV2Util.structTypeToV2Columns(
+          new StructType().add("id", IntegerType).add("value", IntegerType))
+      )
+      assert(spark.table(tableName).isEmpty)
+    }
+  }
 }
 
 /**
@@ -1635,5 +1748,24 @@ class RecordingInMemoryTableCatalog extends InMemoryTableCatalog {
   override def alterTable(ident: Identifier, changes: TableChange*): V2Table = {
     recordedAlters += changes.toSeq
     super.alterTable(ident, changes: _*)
+  }
+}
+
+/**
+ * A [[StagingInMemoryTableCatalog]] that records every `alterTable` and `stageReplace`
+ * invocation, so tests can assert whether materialization evolved or replaced a table.
+ */
+class RecordingStagingInMemoryTableCatalog extends StagingInMemoryTableCatalog {
+  val recordedAlters: mutable.ArrayBuffer[Seq[TableChange]] = mutable.ArrayBuffer.empty
+  val recordedReplaces: mutable.ArrayBuffer[Identifier] = mutable.ArrayBuffer.empty
+
+  override def alterTable(ident: Identifier, changes: TableChange*): V2Table = {
+    recordedAlters += changes.toSeq
+    super.alterTable(ident, changes: _*)
+  }
+
+  override def stageReplace(ident: Identifier, tableInfo: TableInfo): StagedTable = {
+    recordedReplaces += ident
+    super.stageReplace(ident, tableInfo)
   }
 }
