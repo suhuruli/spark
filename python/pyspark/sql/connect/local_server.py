@@ -346,7 +346,7 @@ def startup_seed_conf(opts: Dict[str, Any]) -> Dict[str, Any]:
     """
     conf: Dict[str, Any] = {}
     for i in range(int(os.environ.get("PYSPARK_REMOTE_INIT_CONF_LEN", "0"))):
-        conf = json.loads(os.environ["PYSPARK_REMOTE_INIT_CONF_{}".format(i)])
+        conf.update(json.loads(os.environ["PYSPARK_REMOTE_INIT_CONF_{}".format(i)]))
     conf.update(opts)
     return _strip_launcher_conf(conf)
 

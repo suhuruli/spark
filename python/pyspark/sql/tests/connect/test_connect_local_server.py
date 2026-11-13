@@ -159,6 +159,20 @@ class LocalConnectServerReuseTests(unittest.TestCase):
                 },
             )
 
+    def test_startup_seed_conf_merges_all_chunks(self) -> None:
+        from unittest import mock
+
+        # spark-submit passes its configurations in chunks of at most 10 entries.
+        chunks = [{"spark.jars": "a.jar", "spark.sql.shuffle.partitions": "8"}, {"spark.k": "v"}]
+        env = {"PYSPARK_REMOTE_INIT_CONF_LEN": str(len(chunks))}
+        for i, chunk in enumerate(chunks):
+            env["PYSPARK_REMOTE_INIT_CONF_{}".format(i)] = json.dumps(chunk)
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(
+                local_server.startup_seed_conf({"spark.k": "w"}),
+                {"spark.jars": "a.jar", "spark.sql.shuffle.partitions": "8", "spark.k": "w"},
+            )
+
     def test_start_delegates_launch_options(self) -> None:
         from unittest import mock
 

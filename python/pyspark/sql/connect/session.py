@@ -243,7 +243,7 @@ class SparkSession:
         def _apply_options(self, session: "SparkSession") -> None:
             init_opts = {}
             for i in range(int(os.environ.get("PYSPARK_REMOTE_INIT_CONF_LEN", "0"))):
-                init_opts = json.loads(os.environ[f"PYSPARK_REMOTE_INIT_CONF_{i}"])
+                init_opts.update(json.loads(os.environ[f"PYSPARK_REMOTE_INIT_CONF_{i}"]))
 
             # The options are applied after session creation,
             # so options ["spark.remote", "spark.master"] always take no effect.
@@ -1285,7 +1285,7 @@ class SparkSession:
         if session is None or session._sc._jsc is None:
             init_opts = {}
             for i in range(int(os.environ.get("PYSPARK_REMOTE_INIT_CONF_LEN", "0"))):
-                init_opts = json.loads(os.environ[f"PYSPARK_REMOTE_INIT_CONF_{i}"])
+                init_opts.update(json.loads(os.environ[f"PYSPARK_REMOTE_INIT_CONF_{i}"]))
             init_opts.update(opts)
             opts = init_opts
 
