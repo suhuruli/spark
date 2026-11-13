@@ -1827,6 +1827,35 @@ class PythonPipelineSuite
       |""".stripMargin)
   }
 
+  private val planIndependentAnalysisPythonCommands = Seq(
+    "spark.createDataFrame([(1, 'a')], 'id INT, name STRING')",
+    "spark.createDataFrame([(1, 'a')], 'id: int, name: string')",
+    "spark.version")
+
+  gridTest("analysis that does not analyze a plan is allowed inside flow function")(
+    planIndependentAnalysisPythonCommands) { command =>
+    val graph = buildGraph(s"""
+      |@dp.materialized_view()
+      |def mv():
+      |  $command
+      |  return spark.range(5)
+      |""".stripMargin)
+    assert(graph.flows.size == 1)
+  }
+
+  test("createDataFrame with a DDL schema string inside flow function produces the data") {
+    val graph = buildGraph("""
+      |@dp.materialized_view()
+      |def mv():
+      |  return spark.createDataFrame([(1, "a"), (2, "b")], "id INT, name STRING")
+      |""".stripMargin)
+    val updateContext = TestPipelineUpdateContext(spark, graph, storageRoot)
+    updateContext.pipelineExecution.runPipeline()
+    updateContext.pipelineExecution.awaitCompletion()
+    val rows = spark.table(graphIdentifier("mv").quotedString).collect()
+    assert(rows.map(r => (r.getInt(0), r.getString(1))).toSet == Set((1, "a"), (2, "b")))
+  }
+
   private val eagerAnalysisPythonCommands = Seq("df.schema", "df.isStreaming", "df.isLocal()")
 
   gridTest("eager analysis inside flow function is blocked")(eagerAnalysisPythonCommands) {
