@@ -52,18 +52,33 @@ object SparkPipelines extends Logging {
   /**
    * Split the arguments into spark-submit args (--master, --remote, etc.) and pipeline args
    * (run, --spec, etc.).
+   *
+   * Declarative Pipelines always runs with Spark Connect. If `--master` is given, it is passed to
+   * spark-submit together with `spark.api.mode=connect`, which starts a Spark Connect server
+   * running on that master in the driver. Otherwise, `--remote` is used, defaulting to `local`.
    */
   private def splitArgs(args: Array[String]): (Seq[String], Seq[String]) = {
     val sparkSubmitArgs = new ArrayBuffer[String]()
     val pipelinesArgs = new ArrayBuffer[String]()
-    var remote = "local"
+    var remote: Option[String] = None
+    var master: Option[String] = None
 
     new SparkSubmitArgumentsParser() {
       parse(JArrays.asList(args: _*))
 
       override protected def handle(opt: String, value: String): Boolean = {
         if (opt == "--remote") {
-          remote = value
+          remote = Some(value)
+        } else if (opt == "--master") {
+          master = Some(value)
+        } else if (opt == "--deploy-mode") {
+          if (value != "client") {
+            logError(
+              s"--deploy-mode must be 'client' (was '$value'). The spark-pipelines CLI runs " +
+                "the pipeline from the local machine, so only the client deploy mode is supported."
+            )
+            throw SparkUserAppException(SparkExitCode.EXIT_FAILURE)
+          }
         } else if (opt == "--class") {
           logError("--class argument not supported.")
           throw SparkUserAppException(SparkExitCode.EXIT_FAILURE)
@@ -103,8 +118,19 @@ object SparkPipelines extends Logging {
 
     sparkSubmitArgs += "--conf"
     sparkSubmitArgs += s"$SPARK_API_MODE=connect"
-    sparkSubmitArgs += "--remote"
-    sparkSubmitArgs += remote
+    (master, remote) match {
+      case (Some(_), Some(_)) =>
+        logError(
+          "--master and --remote cannot be specified together. Use --master to run the " +
+            "pipeline on a cluster manager, or --remote to connect to a Spark Connect server.")
+        throw SparkUserAppException(SparkExitCode.EXIT_FAILURE)
+      case (Some(m), None) =>
+        sparkSubmitArgs += "--master"
+        sparkSubmitArgs += m
+      case (None, r) =>
+        sparkSubmitArgs += "--remote"
+        sparkSubmitArgs += r.getOrElse("local")
+    }
     (sparkSubmitArgs.toSeq, pipelinesArgs.toSeq)
   }
 

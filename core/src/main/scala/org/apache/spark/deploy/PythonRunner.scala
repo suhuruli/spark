@@ -97,7 +97,15 @@ object PythonRunner {
     if (isAPIModeClassic) {
       sparkConf.getOption("spark.master").foreach(url => env.put("MASTER", url))
     } else {
-      sparkConf.getOption("spark.remote").foreach(url => env.put("SPARK_REMOTE", url))
+      sparkConf.getOption("spark.remote") match {
+        case Some(url) => env.put("SPARK_REMOTE", url)
+        case None =>
+          // With `spark.api.mode=connect` and no remote, PySpark starts a Spark Connect server
+          // running on the given master. Pass both so that PySpark neither falls back to Spark
+          // Classic nor to the default `local` master.
+          env.put("SPARK_API_MODE", apiMode)
+          sparkConf.getOption("spark.master").foreach(url => env.put("MASTER", url))
+      }
     }
     env.put("PYTHONPATH", pythonPath)
     // This is equivalent to setting the -u flag; we use it because ipython doesn't support -u:

@@ -24,8 +24,6 @@ class SparkPipelinesSuite extends SparkSubmitTestUtils {
     val args = Array(
       "--remote",
       "local[2]",
-      "--deploy-mode",
-      "client",
       "--supervise",
       "--conf",
       "spark.conf1=2",
@@ -36,8 +34,6 @@ class SparkPipelinesSuite extends SparkSubmitTestUtils {
       SparkPipelines.constructSparkSubmitArgs(
         pipelinesCliFile = "abc/python/pyspark/pipelines/cli.py", args = args) ==
       Seq(
-        "--deploy-mode",
-        "client",
         "--supervise",
         "--conf",
         "spark.conf1=2",
@@ -208,5 +204,55 @@ class SparkPipelinesSuite extends SparkSubmitTestUtils {
           "myproject"
         )
     )
+  }
+
+  test("master arg is passed to spark-submit instead of the default remote") {
+    Seq("local[*]", "local[2]", "yarn", "spark://host:7077", "k8s://https://host:443").foreach {
+      master =>
+        val args = Array("--master", master, "run", "--spec", "spark-pipeline.yml")
+        assert(
+          SparkPipelines.constructSparkSubmitArgs(
+            pipelinesCliFile = "abc/python/pyspark/pipelines/cli.py", args = args) ==
+            Seq(
+              "--conf",
+              "spark.api.mode=connect",
+              "--master",
+              master,
+              "abc/python/pyspark/pipelines/cli.py",
+              "run",
+              "--spec",
+              "spark-pipeline.yml"
+            )
+        )
+    }
+  }
+
+  test("master and remote args are mutually exclusive") {
+    val args = Array("--master", "local[*]", "--remote", "sc://host:15002", "run")
+    intercept[SparkUserAppException] {
+      SparkPipelines.constructSparkSubmitArgs(
+        pipelinesCliFile = "abc/python/pyspark/pipelines/cli.py", args = args)
+    }
+  }
+
+  test("client deploy mode is accepted and cluster deploy mode is rejected") {
+    val args = Array("--master", "local[2]", "--deploy-mode", "client", "run")
+    assert(
+      SparkPipelines.constructSparkSubmitArgs(
+        pipelinesCliFile = "abc/python/pyspark/pipelines/cli.py", args = args) ==
+        Seq(
+          "--conf",
+          "spark.api.mode=connect",
+          "--master",
+          "local[2]",
+          "abc/python/pyspark/pipelines/cli.py",
+          "run"
+        )
+    )
+    intercept[SparkUserAppException] {
+      SparkPipelines.constructSparkSubmitArgs(
+        pipelinesCliFile = "abc/python/pyspark/pipelines/cli.py",
+        args = Array("--master", "yarn", "--deploy-mode", "cluster", "run"))
+    }
   }
 }

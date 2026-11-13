@@ -107,7 +107,15 @@ The `spark-pipelines init` command, described below, makes it easy to generate a
 
 The `spark-pipelines` command line interface (CLI) is the primary way to manage a pipeline.
 
-`spark-pipelines` is built on top of `spark-submit`, meaning that it supports all cluster managers supported by `spark-submit`. It supports all `spark-submit` arguments except for `--class`.
+`spark-pipelines` is built on top of `spark-submit`, meaning that it supports all cluster managers supported by `spark-submit`. It supports all `spark-submit` arguments except for `--class` and `--deploy-mode cluster`.
+
+Pipelines always run with Spark Connect. Where the Spark Connect server runs depends on the arguments:
+
+* `--master MASTER_URL` starts a Spark Connect server in the driver, running on the given master, for example `local[*]`, `yarn`, `spark://host:port` or `k8s://...`.
+* `--remote local[...]` starts a local Spark Connect server, and `--remote sc://host:port` connects to an existing Spark Connect server.
+* Without `--master` or `--remote`, the pipeline runs on a local Spark Connect server, as with `--remote local`.
+
+`--master` and `--remote` cannot be used together. Only the `client` deploy mode is supported, so `--deploy-mode cluster` is rejected.
 
 ### `spark-pipelines init`
 
@@ -117,7 +125,7 @@ The `spark-pipelines` command line interface (CLI) is the primary way to manage 
 
 `spark-pipelines run` launches an execution of a pipeline and monitors its progress until it completes.
 
-Since `spark-pipelines` is built on top of `spark-submit`, it supports all `spark-submit` arguments except for `--class`. For the complete list of available parameters, see the [Spark Submit documentation](https://spark.apache.org/docs/latest/submitting-applications.html#launching-applications-with-spark-submit).
+Since `spark-pipelines` is built on top of `spark-submit`, it supports all `spark-submit` arguments except for `--class` and `--deploy-mode cluster`. For the complete list of available parameters, see the [Spark Submit documentation](https://spark.apache.org/docs/latest/submitting-applications.html#launching-applications-with-spark-submit).
 
 It also supports several pipeline-specific parameters:
 
@@ -155,6 +163,9 @@ spark-pipelines run --full-refresh-all
 # Run with custom Spark configuration
 spark-pipelines run --conf spark.sql.shuffle.partitions=200 --driver-memory 4g
 
+# Run on a cluster manager
+spark-pipelines run --master "local[*]"
+
 # Run on remote Spark Connect server
 spark-pipelines run --remote sc://my-cluster:15002
 ```
@@ -166,7 +177,7 @@ spark-pipelines run --remote sc://my-cluster:15002
 - Analysis errors – e.g. selecting from a table or a column that doesn't exist
 - Graph validation errors - e.g. cyclic dependencies
 
-Since `spark-pipelines` is built on top of `spark-submit`, it supports all `spark-submit` arguments except for `--class`. For the complete list of available parameters, see the [Spark Submit documentation](https://spark.apache.org/docs/latest/submitting-applications.html#launching-applications-with-spark-submit).
+Since `spark-pipelines` is built on top of `spark-submit`, it supports all `spark-submit` arguments except for `--class` and `--deploy-mode cluster`. For the complete list of available parameters, see the [Spark Submit documentation](https://spark.apache.org/docs/latest/submitting-applications.html#launching-applications-with-spark-submit).
 
 It also supports the pipeline-specific `--spec` parameter (see description above in the `run` section).
 
