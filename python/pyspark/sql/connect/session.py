@@ -15,7 +15,6 @@
 # limitations under the License.
 #
 import functools
-import json
 import os
 import sys
 import threading
@@ -241,9 +240,9 @@ class SparkSession:
             )
 
         def _apply_options(self, session: "SparkSession") -> None:
-            init_opts = {}
-            for i in range(int(os.environ.get("PYSPARK_REMOTE_INIT_CONF_LEN", "0"))):
-                init_opts = json.loads(os.environ[f"PYSPARK_REMOTE_INIT_CONF_{i}"])
+            from pyspark.sql.connect.local_server import remote_init_conf
+
+            init_opts = remote_init_conf()
 
             # The options are applied after session creation,
             # so options ["spark.remote", "spark.master"] always take no effect.
@@ -1283,9 +1282,9 @@ class SparkSession:
 
         session = PySparkSession._instantiatedSession
         if session is None or session._sc._jsc is None:
-            init_opts = {}
-            for i in range(int(os.environ.get("PYSPARK_REMOTE_INIT_CONF_LEN", "0"))):
-                init_opts = json.loads(os.environ[f"PYSPARK_REMOTE_INIT_CONF_{i}"])
+            from pyspark.sql.connect.local_server import remote_init_conf
+
+            init_opts = remote_init_conf()
             init_opts.update(opts)
             opts = init_opts
 

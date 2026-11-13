@@ -340,13 +340,23 @@ def _strip_launcher_conf(conf: Dict[str, Any]) -> Dict[str, Any]:
     return stripped
 
 
+def remote_init_conf() -> Dict[str, Any]:
+    """Return the configurations that spark-submit passed to this Python process.
+
+    ``PythonRunner`` splits the submitted Spark configurations into groups and exports each group
+    as ``PYSPARK_REMOTE_INIT_CONF_<i>``, so all groups have to be merged.
+    """
+    conf: Dict[str, Any] = {}
+    for i in range(int(os.environ.get("PYSPARK_REMOTE_INIT_CONF_LEN", "0"))):
+        conf.update(json.loads(os.environ["PYSPARK_REMOTE_INIT_CONF_{}".format(i)]))
+    return conf
+
+
 def startup_seed_conf(opts: Dict[str, Any]) -> Dict[str, Any]:
     """Compute startup confs using the same merge as the in-process server path, then strip
     the keys the launcher manages (see ``_strip_launcher_conf``).
     """
-    conf: Dict[str, Any] = {}
-    for i in range(int(os.environ.get("PYSPARK_REMOTE_INIT_CONF_LEN", "0"))):
-        conf = json.loads(os.environ["PYSPARK_REMOTE_INIT_CONF_{}".format(i)])
+    conf = remote_init_conf()
     conf.update(opts)
     return _strip_launcher_conf(conf)
 

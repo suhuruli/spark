@@ -159,6 +159,25 @@ class LocalConnectServerReuseTests(unittest.TestCase):
                 },
             )
 
+    def test_remote_init_conf_merges_all_groups(self) -> None:
+        from unittest import mock
+
+        # spark-submit exports the submitted configurations in groups of at most 10 entries.
+        env = {
+            "PYSPARK_REMOTE_INIT_CONF_LEN": "2",
+            "PYSPARK_REMOTE_INIT_CONF_0": json.dumps({"spark.sql.catalog.uc.token": "t"}),
+            "PYSPARK_REMOTE_INIT_CONF_1": json.dumps({"spark.sql.shuffle.partitions": "8"}),
+        }
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(
+                local_server.remote_init_conf(),
+                {"spark.sql.catalog.uc.token": "t", "spark.sql.shuffle.partitions": "8"},
+            )
+            self.assertEqual(
+                local_server.startup_seed_conf({}),
+                {"spark.sql.catalog.uc.token": "t", "spark.sql.shuffle.partitions": "8"},
+            )
+
     def test_start_delegates_launch_options(self) -> None:
         from unittest import mock
 
