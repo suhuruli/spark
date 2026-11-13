@@ -65,8 +65,10 @@ private[connect] class SparkConnectAnalyzeHandler(
     val builder = proto.AnalyzePlanResponse.newBuilder()
     val userContext = request.getUserContext
 
-    // Pipeline has not yet supported eager analysis inside flow function.
-    if (PipelineAnalysisContextUtils.isInsidePipelineFlowFunction(userContext)) {
+    // Pipeline has not yet supported eager analysis inside flow function. Requests that do not
+    // analyze a plan (e.g. parsing the DDL schema string passed to createDataFrame) are allowed.
+    if (PipelineAnalysisContextUtils.isInsidePipelineFlowFunction(userContext) &&
+        !SparkConnectAnalyzeHandler.planIndependentAnalyzeCases.contains(request.getAnalyzeCase)) {
       throw new AnalysisException("ATTEMPT_ANALYSIS_IN_PIPELINE_QUERY_FUNCTION", Map())
     }
 
@@ -256,4 +258,13 @@ private[connect] class SparkConnectAnalyzeHandler(
       .setServerSideSessionId(sessionHolder.serverSessionId)
     builder.build()
   }
+}
+
+private[connect] object SparkConnectAnalyzeHandler {
+
+  /** Analyze requests that do not analyze or execute a query plan. */
+  val planIndependentAnalyzeCases: Set[proto.AnalyzePlanRequest.AnalyzeCase] = Set(
+    proto.AnalyzePlanRequest.AnalyzeCase.SPARK_VERSION,
+    proto.AnalyzePlanRequest.AnalyzeCase.DDL_PARSE,
+    proto.AnalyzePlanRequest.AnalyzeCase.JSON_TO_DDL)
 }
