@@ -76,7 +76,7 @@ object DatasetManager extends Logging {
   case class TableMaterializationException(
       tableName: String,
       cause: Throwable
-  ) extends Exception(cause)
+  ) extends Exception(s"Failed to materialize table $tableName: ${cause.getMessage}", cause)
       with NoStackTrace
 
   /**

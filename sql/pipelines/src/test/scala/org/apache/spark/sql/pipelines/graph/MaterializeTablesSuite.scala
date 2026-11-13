@@ -360,6 +360,9 @@ abstract class MaterializeTablesSuite extends BaseCoreExecutionTest {
 
       }.resolveToDataflowGraph(), storageRoot = storageRoot)
     }
+    // The message names the table, since it is all that reaches a Spark Connect client.
+    assert(ex.getMessage.startsWith(
+      s"Failed to materialize table ${fullyQualifiedIdentifier("t6").unquotedString}: "))
     val cause = ex.cause
     val exStr = exceptionString(cause)
     assert(exStr.contains("Failed to merge incompatible data types"))
