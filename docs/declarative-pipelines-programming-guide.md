@@ -1124,6 +1124,98 @@ When working with sinks, keep the following considerations in mind:
 - **Python API**: Sink functionality is available only through the Python API, not SQL
 - **Append-only**: Only append operations are supported; full refresh updates reset checkpoints but do not clean previously computed results
 
+## Using Apache Iceberg Tables
+
+SDP reads and writes [Apache Iceberg](https://iceberg.apache.org/) tables through Iceberg's Spark catalog. Materialized views, streaming tables, append flows, partitioning, and table properties all work with Iceberg tables, and a pipeline can mix an Iceberg catalog with the session catalog (`spark_catalog`).
+
+### Setting Up an Iceberg Catalog
+
+Iceberg is not bundled with Spark. Iceberg publishes one `iceberg-spark-runtime-<spark version>_<scala version>` jar per Spark minor version; pass the jar that matches your Spark version with `--jars` (or `--packages`). Register the Iceberg session extensions with `--conf`, since `spark.sql.extensions` is a static configuration and must be set when the Spark session starts:
+
+```bash
+spark-pipelines run \
+  --jars /path/to/iceberg-spark-runtime-4.1_2.13-1.12.0.jar \
+  --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
+```
+
+Configure the catalog in the `configuration` section of `spark-pipeline.yml`, and use it as the pipeline's default catalog. The example below uses an Iceberg Hadoop catalog named `ice` with a local warehouse; any Iceberg catalog type (Hive, JDBC, REST, and so on) is configured the same way:
+
+```yaml
+name: iceberg_pipeline
+storage: file:///path/to/pipeline-storage
+catalog: ice
+database: sdp
+configuration:
+  spark.sql.catalog.ice: org.apache.iceberg.spark.SparkCatalog
+  spark.sql.catalog.ice.type: hadoop
+  spark.sql.catalog.ice.warehouse: file:///path/to/warehouse
+libraries:
+  - glob:
+      include: transformations/**
+```
+
+SDP does not create namespaces. Create the pipeline's default namespace before the first run, for example with `CREATE NAMESPACE ice.sdp` in `spark-sql` or PySpark; otherwise the run fails with `SCHEMA_NOT_FOUND`.
+
+### Defining Iceberg Datasets
+
+Datasets in an Iceberg catalog are created as Iceberg tables. `partition_cols` (or `PARTITIONED BY`) become identity partitions of the Iceberg table, and `table_properties` (or `TBLPROPERTIES`) are set as Iceberg table properties, so Iceberg properties such as `format-version` or `write.parquet.compression-codec` can be declared directly. `format` does not need to be set.
+
+```python
+from pyspark import pipelines as dp
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import functions as F
+
+spark = SparkSession.active()
+
+@dp.table(
+    partition_cols=["region"],
+    table_properties={"format-version": "2", "write.parquet.compression-codec": "zstd"},
+)
+def orders_bronze() -> DataFrame:
+    return spark.readStream.table("ice.raw.orders")
+
+@dp.materialized_view(partition_cols=["region"])
+def region_revenue() -> DataFrame:
+    return spark.read.table("orders_bronze").groupBy("region").agg(F.sum("amount").alias("revenue"))
+```
+
+```sql
+CREATE MATERIALIZED VIEW channel_summary
+PARTITIONED BY (channel)
+TBLPROPERTIES ('team' = 'analytics')
+AS SELECT channel, COUNT(*) AS orders FROM orders_bronze GROUP BY channel;
+```
+
+### Reading Iceberg Tables
+
+Read existing Iceberg tables with `spark.read.table` for batch flows and `spark.readStream.table` (or `STREAM(...)` in SQL) for streaming flows. Iceberg read options, such as `stream-from-timestamp`, can be passed with `.option(...)`.
+
+An Iceberg streaming read processes the data files added by append snapshots. Without a checkpoint it starts from the oldest snapshot in the table's history, and it fails on snapshots that delete or overwrite data unless told to skip them (`streaming-skip-delete-snapshots`, `streaming-skip-overwrite-snapshots`). Consequently:
+
+- Use streaming reads on append-only tables, such as streaming tables and externally ingested tables.
+- Read materialized views with batch reads. A materialized view is rewritten on every run, so a streaming read of it does not see its changes.
+
+### Refresh and Schema Changes
+
+When SDP recomputes an Iceberg table from scratch, that is, on every run of a materialized view and on a full refresh of a streaming table, it atomically replaces the table (`REPLACE TABLE`) because Iceberg's catalog supports staged table replacement. Replacing the table starts a new snapshot lineage, so streaming flows that read a fully refreshed streaming table, and whose checkpoints are reset by the same full refresh, read only the recomputed data.
+
+- Materialized views accept any schema change, including changing a column's type.
+- Streaming tables evolve their schema additively on incremental runs (new columns are added). Other schema changes need a full refresh.
+- Partitioning cannot change on an existing table, even on a full refresh. Drop the table to change it.
+
+### Using Multiple Catalogs
+
+Datasets can live in different catalogs; qualify their names with the catalog, for example `@dp.materialized_view(name="spark_catalog.default.region_report")`. Every catalog that a pipeline writes to must keep its metadata between runs. When `spark-pipelines` starts a local Spark session, `spark_catalog` is an in-memory catalog that forgets its tables when the run ends, so the next run fails with `LOCATION_ALREADY_EXISTS`. To keep `spark_catalog` tables across runs, run with `--conf spark.sql.catalogImplementation=hive` to use an embedded Hive metastore in the working directory, or point `spark_catalog` at a persistent metastore.
+
+### Example
+
+`examples/src/main/python/pipelines/iceberg` in the Spark repository contains a complete pipeline that ingests an Iceberg table into a partitioned streaming table, fans it into a streaming table with two append flows, and computes materialized views in the Iceberg catalog and in `spark_catalog`. Its `run_iceberg_pipeline.sh` script seeds the source table, runs the pipeline incrementally and with a full refresh, and checks the results:
+
+```bash
+ICEBERG_JAR=/path/to/iceberg-spark-runtime-4.1_2.13-1.12.0.jar \
+  examples/src/main/python/pipelines/iceberg/run_iceberg_pipeline.sh
+```
+
 ## Important Considerations
 
 ### Python Considerations
