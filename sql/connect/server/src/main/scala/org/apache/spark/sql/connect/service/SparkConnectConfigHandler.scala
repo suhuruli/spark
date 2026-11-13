@@ -94,6 +94,10 @@ class SparkConnectConfigHandler(responseObserver: StreamObserver[proto.ConfigRes
         conf.set(key, value.orNull)
         getWarning(key).foreach(builder.addWarnings)
       } catch {
+        case _: Throwable if silent && conf.getOption(key) == value =>
+          // The session already has this value, e.g. a static config that
+          // `SparkSession.builder.config` passed both to a local server at startup and to the
+          // session it created. Nothing would change, so there is nothing to report.
         case e: Throwable =>
           if (silent) {
             // The condition, not the message: `INVALID_CONF_VALUE` quotes the rejected value,
