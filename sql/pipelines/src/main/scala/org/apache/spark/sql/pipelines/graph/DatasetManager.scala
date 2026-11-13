@@ -24,8 +24,17 @@ import org.apache.spark.SparkException
 import org.apache.spark.internal.{Logging, LogKeys}
 import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalyst.TableIdentifier
-import org.apache.spark.sql.catalyst.analysis.{NoSuchTableException, PersistedView, Resolver}
-import org.apache.spark.sql.classic.SparkSession
+import org.apache.spark.sql.catalyst.analysis.{
+  NoSuchTableException,
+  PersistedView,
+  ResolvedIdentifier,
+  Resolver,
+  SchemaBinding,
+  SchemaCompensation,
+  SchemaUnsupported
+}
+import org.apache.spark.sql.catalyst.plans.logical.CreateView
+import org.apache.spark.sql.classic.{Dataset, SparkSession}
 import org.apache.spark.sql.connector.catalog.{
   CatalogV2Util,
   Identifier,
@@ -258,20 +267,6 @@ object DatasetManager extends Logging {
   }
 
   private def materializeView(view: View, flow: ResolvedFlow, spark: SparkSession): Unit = {
-    val command = CreateViewCommand(
-      name = view.identifier,
-      userSpecifiedColumns = Nil,
-      viewType = PersistedView,
-      comment = view.comment,
-      collation = None,
-      properties = view.properties,
-      originalText = view.sqlText,
-      plan = flow.df.logicalPlan,
-      allowExisting = true,
-      replace = true,
-      isAnalyzed = true
-    )
-
     val queryContext = flow.queryContext
 
     val catalogManager = spark.sessionState.catalogManager
@@ -282,7 +277,51 @@ object DatasetManager extends Logging {
       // directed to the right catalog/database.
       queryContext.currentCatalog.foreach(catalogManager.setCurrentCatalog)
       queryContext.currentDatabase.map(d => Array(d)).foreach(catalogManager.setCurrentNamespace)
-      command.run(spark)
+      val catalog = view.identifier.catalog
+        .map(catalogManager.catalog)
+        .getOrElse(catalogManager.currentCatalog)
+      if (CatalogV2Util.isSessionCatalog(catalog)) {
+        CreateViewCommand(
+          name = view.identifier,
+          userSpecifiedColumns = Nil,
+          viewType = PersistedView,
+          comment = view.comment,
+          collation = None,
+          properties = view.properties,
+          originalText = view.sqlText,
+          plan = flow.df.logicalPlan,
+          allowExisting = true,
+          replace = true,
+          isAnalyzed = true
+        ).run(spark)
+      } else {
+        // `CreateViewCommand` only writes to the session catalog, so views in other catalogs go
+        // through the DSv2 `CreateView` plan, which requires the catalog to be a `ViewCatalog`.
+        val ident = Identifier.of(view.identifier.database.toArray, view.identifier.table)
+        // Same schema binding as `CREATE VIEW` without a `WITH SCHEMA` clause.
+        val conf = spark.sessionState.conf
+        val viewSchemaMode = if (!conf.viewSchemaBindingEnabled) {
+          SchemaUnsupported
+        } else if (conf.viewSchemaCompensation) {
+          SchemaCompensation
+        } else {
+          SchemaBinding
+        }
+        val command = CreateView(
+          child = ResolvedIdentifier(catalog, ident),
+          userSpecifiedColumns = Nil,
+          comment = view.comment,
+          collation = None,
+          properties = view.properties,
+          originalText = view.sqlText,
+          query = flow.df.logicalPlan,
+          allowExisting = false,
+          replace = true,
+          viewSchemaMode = viewSchemaMode,
+          isAnalyzed = true
+        )
+        Dataset.ofRows(spark, command)
+      }
     } finally {
       catalogManager.setCurrentCatalog(currentCatalogName)
       catalogManager.setCurrentNamespace(currentNamespace)

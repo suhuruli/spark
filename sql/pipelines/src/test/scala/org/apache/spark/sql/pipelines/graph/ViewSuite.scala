@@ -18,6 +18,7 @@ package org.apache.spark.sql.pipelines.graph
 
 import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalyst.TableIdentifier
+import org.apache.spark.sql.connector.catalog.InMemoryRelationCatalog
 import org.apache.spark.sql.pipelines.common.FlowStatus
 import org.apache.spark.sql.pipelines.logging.EventLevel
 import org.apache.spark.sql.pipelines.utils.ExecutionTest
@@ -65,6 +66,33 @@ class ViewSuite extends ExecutionTest with SharedSparkSession {
       spark.sql(s"SELECT * FROM $viewIdentifier"),
       Seq(1L, 2L, 3L).toDF()
     )
+  }
+
+  test("create persisted view in a non-session catalog") {
+    val session = spark
+    import session.implicits._
+
+    val catalogName = "view_catalog"
+    spark.conf.set(s"spark.sql.catalog.$catalogName", classOf[InMemoryRelationCatalog].getName)
+    spark.sql(s"CREATE NAMESPACE $catalogName.ns")
+    spark.sql(s"CREATE DATABASE IF NOT EXISTS spark_catalog.ns")
+    try {
+      val unresolvedDataflowGraph = unresolvedDataflowGraphFromSql(
+        sqlText = s"CREATE VIEW $catalogName.ns.v AS SELECT * FROM range(1, 4);"
+      )
+      // Run twice so that the second run replaces the view created by the first run.
+      (1 to 2).foreach { _ =>
+        val updateContext =
+          TestPipelineUpdateContext(spark, unresolvedDataflowGraph, storageRoot)
+        updateContext.pipelineExecution.runPipeline()
+        updateContext.pipelineExecution.awaitCompletion()
+      }
+
+      checkAnswer(spark.sql(s"SELECT * FROM $catalogName.ns.v"), Seq(1L, 2L, 3L).toDF())
+      assert(!spark.catalog.tableExists("spark_catalog.ns.v"))
+    } finally {
+      spark.sql("DROP DATABASE IF EXISTS spark_catalog.ns CASCADE")
+    }
   }
 
   test("persisted view reads from external table") {
