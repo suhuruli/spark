@@ -125,6 +125,8 @@ It also supports several pipeline-specific parameters:
   * `spark-pipeline.yml`
   * `spark-pipeline.yaml`
 
+  The directory containing the spec file is the root of the pipeline project: the CLI changes its working directory to it before starting the Spark session, so paths that Spark resolves against its working directory (such as `spark-warehouse/`, the Hive metastore's `metastore_db/`, or a relative `storage` location) resolve against the project root regardless of the directory `spark-pipelines` is launched from.
+
 * `--full-refresh DATASETS` - List of datasets to reset and recompute (comma-separated). This clears all existing data and checkpoints for the specified datasets and recomputes them from scratch.
 
 * `--full-refresh-all` - Perform a full graph reset and recompute. This is equivalent to `--full-refresh` for all datasets in the pipeline.

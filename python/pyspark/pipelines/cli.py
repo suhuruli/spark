@@ -314,45 +314,54 @@ def run(
                 },
             )
 
+    # Resolve the spec path before changing the working directory below, so that a relative --spec
+    # path is interpreted relative to the directory the CLI was launched from.
+    spec_path = spec_path.resolve()
     log_with_curr_timestamp(f"Loading pipeline spec from {spec_path}...")
     spec = load_pipeline_spec(spec_path)
 
-    log_with_curr_timestamp("Creating Spark session...")
-    spark_builder = SparkSession.builder.config(
-        "spark.sql.connect.serverStacktrace.enabled", "false"
-    )
-    for key, value in spec.configuration.items():
-        spark_builder = spark_builder.config(key, value)
-
-    spark = spark_builder.getOrCreate()
-    # Stop the session even if graph creation, registration, or the run itself fails, so a failure
-    # after the session is created does not leak it.
-    try:
-        log_with_curr_timestamp("Creating dataflow graph...")
-        dataflow_graph_id = create_dataflow_graph(
-            spark,
-            default_catalog=spec.catalog,
-            default_database=spec.database,
-            sql_conf=spec.configuration,
+    # The directory containing the spec file is the root of the pipeline project. Run from there so
+    # that the Spark session, and the local Spark Connect server started behind it, resolve paths
+    # relative to the working directory (e.g. spark-warehouse/, or metastore_db/ and derby.log with
+    # the Hive catalog) against the project root rather than against the directory the CLI was
+    # launched from, which may be a subdirectory of the project or unrelated to it.
+    with change_dir(spec_path.parent):
+        log_with_curr_timestamp("Creating Spark session...")
+        spark_builder = SparkSession.builder.config(
+            "spark.sql.connect.serverStacktrace.enabled", "false"
         )
+        for key, value in spec.configuration.items():
+            spark_builder = spark_builder.config(key, value)
 
-        log_with_curr_timestamp("Registering graph elements...")
-        registry = SparkConnectGraphElementRegistry(spark, dataflow_graph_id)
-        register_definitions(spec_path, registry, spec, spark, dataflow_graph_id)
+        spark = spark_builder.getOrCreate()
+        # Stop the session even if graph creation, registration, or the run itself fails, so a
+        # failure after the session is created does not leak it.
+        try:
+            log_with_curr_timestamp("Creating dataflow graph...")
+            dataflow_graph_id = create_dataflow_graph(
+                spark,
+                default_catalog=spec.catalog,
+                default_database=spec.database,
+                sql_conf=spec.configuration,
+            )
 
-        log_with_curr_timestamp("Starting run...")
-        result_iter = start_run(
-            spark,
-            dataflow_graph_id,
-            full_refresh=full_refresh,
-            full_refresh_all=full_refresh_all,
-            refresh=refresh,
-            dry=dry,
-            storage=spec.storage,
-        )
-        handle_pipeline_events(result_iter)
-    finally:
-        spark.stop()
+            log_with_curr_timestamp("Registering graph elements...")
+            registry = SparkConnectGraphElementRegistry(spark, dataflow_graph_id)
+            register_definitions(spec_path, registry, spec, spark, dataflow_graph_id)
+
+            log_with_curr_timestamp("Starting run...")
+            result_iter = start_run(
+                spark,
+                dataflow_graph_id,
+                full_refresh=full_refresh,
+                full_refresh_all=full_refresh_all,
+                refresh=refresh,
+                dry=dry,
+                storage=spec.storage,
+            )
+            handle_pipeline_events(result_iter)
+        finally:
+            spark.stop()
 
 
 def parse_table_list(value: str) -> List[str]:

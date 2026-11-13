@@ -19,6 +19,8 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from typing import Any, Dict, Iterator
+from unittest import mock
 
 from pyspark.errors import PySparkException
 from pyspark.testing.connectutils import (
@@ -441,6 +443,119 @@ class CLIUtilityTests(ReusedConnectTestCase):
             self.assertEqual(
                 context.exception.getCondition(), "CONFLICTING_PIPELINE_REFRESH_OPTIONS"
             )
+
+    def _run_with_mocked_session(self, spec_path: Path, dry: bool = False) -> Dict[str, Any]:
+        """Runs the pipeline at the given spec path with the Spark session and the server-side
+        operations mocked out, and records the working directory the session was created in.
+
+        The mocked session creation writes a `derby.log` file to the working directory, like the
+        Hive metastore of a local Spark session does."""
+        recorded: Dict[str, Any] = {}
+        spark = mock.MagicMock()
+
+        class FakeSparkSessionBuilder:
+            def config(self, key: str, value: str) -> "FakeSparkSessionBuilder":
+                return self
+
+            def getOrCreate(self) -> mock.MagicMock:
+                recorded["session_cwd"] = Path.cwd()
+                (Path.cwd() / "derby.log").write_text("")
+                return spark
+
+        class FakeSparkSession:
+            builder = FakeSparkSessionBuilder()
+
+        registry = LocalGraphElementRegistry()
+
+        def fake_start_run(spark: Any, dataflow_graph_id: str, **kwargs: Any) -> Iterator[Any]:
+            recorded["start_run_kwargs"] = kwargs
+            return iter([])
+
+        with (
+            mock.patch("pyspark.pipelines.cli.SparkSession", FakeSparkSession),
+            mock.patch("pyspark.pipelines.cli.create_dataflow_graph", return_value="test_graph_id"),
+            mock.patch(
+                "pyspark.pipelines.cli.SparkConnectGraphElementRegistry", return_value=registry
+            ),
+            mock.patch("pyspark.pipelines.cli.start_run", side_effect=fake_start_run),
+        ):
+            run(spec_path=spec_path, full_refresh=[], full_refresh_all=False, refresh=[], dry=dry)
+
+        recorded["spark"] = spark
+        recorded["registry"] = registry
+        return recorded
+
+    def _create_project(self, root: Path) -> Path:
+        """Creates a pipeline project with a spec file and one Python definitions file under
+        `transformations/`, and returns the path of the spec file."""
+        transformations_dir = root / "transformations"
+        transformations_dir.mkdir(parents=True)
+        spec_path = root / "spark-pipeline.yaml"
+        spec_path.write_text(
+            textwrap.dedent(
+                """
+                {
+                    "name": "test_pipeline",
+                    "storage": "pipeline-storage",
+                    "libraries": [{"glob": {"include": "transformations/**"}}]
+                }
+                """
+            )
+        )
+        (transformations_dir / "defs.py").write_text(
+            textwrap.dedent(
+                """
+                from pyspark import pipelines as dp
+
+                @dp.materialized_view
+                def mv():
+                    return spark.range(1)
+                """
+            )
+        )
+        return spec_path
+
+    def test_run_from_subdirectory_uses_spec_directory_as_working_directory(self):
+        """Tests that the pipeline runs with the directory containing the spec file as the working
+        directory when the CLI is launched from a subdirectory of the project, so that files Spark
+        creates relative to its working directory (spark-warehouse/, metastore_db/, derby.log) land
+        in the project root and are not picked up by the libraries globs."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_dir = Path(temp_dir) / "project"
+            self._create_project(project_dir)
+            subdir = project_dir / "transformations"
+
+            with change_dir(subdir):
+                recorded = self._run_with_mocked_session(find_pipeline_spec(Path.cwd()))
+                # The working directory is restored once the run completes.
+                self.assertEqual(Path.cwd().resolve(), subdir.resolve())
+
+            self.assertEqual(recorded["session_cwd"].resolve(), project_dir.resolve())
+            self.assertTrue((project_dir / "derby.log").is_file())
+            self.assertFalse((subdir / "derby.log").exists())
+            self.assertEqual([flow.name for flow in recorded["registry"].flows], ["mv"])
+            recorded["spark"].stop.assert_called_once()
+
+    def test_run_with_relative_spec_path_outside_current_directory(self):
+        """Tests that a relative --spec path is resolved against the directory the CLI is launched
+        from, and that the run then uses the spec file's directory as the working directory."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_dir = Path(temp_dir) / "project"
+            self._create_project(project_dir)
+            launch_dir = Path(temp_dir) / "elsewhere"
+            launch_dir.mkdir()
+
+            with change_dir(launch_dir):
+                recorded = self._run_with_mocked_session(
+                    Path("..") / "project" / "spark-pipeline.yaml", dry=True
+                )
+                self.assertEqual(Path.cwd().resolve(), launch_dir.resolve())
+
+            self.assertEqual(recorded["session_cwd"].resolve(), project_dir.resolve())
+            self.assertTrue((project_dir / "derby.log").is_file())
+            self.assertFalse((launch_dir / "derby.log").exists())
+            self.assertEqual([flow.name for flow in recorded["registry"].flows], ["mv"])
+            self.assertTrue(recorded["start_run_kwargs"]["dry"])
 
     def test_parse_table_list_single_table(self):
         """Test parsing a single table name."""
