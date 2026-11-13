@@ -18,7 +18,11 @@
 package org.apache.spark.sql.pipelines.graph
 
 import org.apache.spark.sql.classic.SparkSession
-import org.apache.spark.sql.pipelines.logging.{FlowProgressEventLogger, PipelineEvent}
+import org.apache.spark.sql.pipelines.logging.{
+  FlowProgressEventLogger,
+  PipelineEvent,
+  PipelineEventLogWriter
+}
 
 trait PipelineUpdateContext {
 
@@ -57,6 +61,15 @@ trait PipelineUpdateContext {
 
   /** Callback to invoke for internal events that are emitted during a run of a pipeline. */
   def eventCallback: PipelineEvent => Unit
+
+  /** Writer that persists emitted events to the pipeline event log, if it is enabled. */
+  def eventLogWriter: Option[PipelineEventLogWriter] = None
+
+  /** Records `event` in the event log, if it is enabled, and then invokes `eventCallback`. */
+  final def emitEvent(event: PipelineEvent): Unit = {
+    eventLogWriter.foreach(_.write(event))
+    eventCallback(event)
+  }
 
   /** Emits internal flow progress events into the event buffer. */
   def flowProgressEventLogger: FlowProgressEventLogger

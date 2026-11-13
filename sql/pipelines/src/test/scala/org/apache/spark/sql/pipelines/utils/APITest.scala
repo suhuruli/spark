@@ -40,11 +40,14 @@ import org.apache.spark.util.Utils
  *   the database to publish data from the pipeline
  * @param include
  *   the list of source files to include in the pipeline spec
+ * @param configuration
+ *   additional Spark configuration properties to set for the pipeline
  */
 case class TestPipelineSpec(
     catalog: Option[String] = None,
     database: Option[String] = None,
-    include: Seq[String])
+    include: Seq[String],
+    configuration: Map[String, String] = Map.empty)
 
 /**
  * Available configurations for running a test pipeline.

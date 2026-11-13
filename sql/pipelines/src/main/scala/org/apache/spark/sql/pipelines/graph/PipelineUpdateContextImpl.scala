@@ -21,7 +21,11 @@ import org.apache.hadoop.fs.Path
 
 import org.apache.spark.SparkException
 import org.apache.spark.sql.classic.SparkSession
-import org.apache.spark.sql.pipelines.logging.{FlowProgressEventLogger, PipelineEvent}
+import org.apache.spark.sql.pipelines.logging.{
+  FlowProgressEventLogger,
+  PipelineEvent,
+  PipelineEventLogWriter
+}
 
 /**
  * An implementation of the PipelineUpdateContext trait used in production.
@@ -45,8 +49,15 @@ class PipelineUpdateContextImpl(
     throw new IllegalStateException("SparkSession is not available")
   )
 
+  override val eventLogWriter: Option[PipelineEventLogWriter] =
+    Option.when(spark.sessionState.conf.pipelinesEventLogEnabled) {
+      new PipelineEventLogWriter(
+        new Path(storageRoot, PipelineEventLogWriter.EVENT_LOG_DIR_NAME),
+        spark.sessionState.newHadoopConf())
+    }
+
   override val flowProgressEventLogger: FlowProgressEventLogger =
-    new FlowProgressEventLogger(eventCallback = eventCallback)
+    new FlowProgressEventLogger(eventCallback = emitEvent)
 
   override val resetCheckpointFlows: FlowFilter = NoFlows
 }

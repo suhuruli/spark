@@ -55,7 +55,7 @@ class PipelineExecution(context: PipelineUpdateContext) {
     // Execute the graph.
     graphExecution = Some(
       new TriggeredGraphExecution(initializedGraph, context, onCompletion = terminationReason => {
-        context.eventCallback(constructTerminationEvent(terminationReason))
+        context.emitEvent(constructTerminationEvent(terminationReason))
       })
     )
     graphExecution.foreach(_.start())
@@ -68,7 +68,7 @@ class PipelineExecution(context: PipelineUpdateContext) {
       context.pipelineExecution.awaitCompletion()
     } catch {
       case e: Throwable =>
-        context.eventCallback(
+        context.emitEvent(
           ConstructPipelineEvent(
             origin = PipelineEventOrigin(
               flowName = None,
@@ -87,7 +87,7 @@ class PipelineExecution(context: PipelineUpdateContext) {
   /** Validates that the pipeline graph can be successfully resolved and validates it. */
   def dryRunPipeline(): Unit = synchronized {
     resolveGraph()
-    context.eventCallback(
+    context.emitEvent(
       constructTerminationEvent(RunCompletion())
     )
   }

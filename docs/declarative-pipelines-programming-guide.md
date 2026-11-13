@@ -170,6 +170,52 @@ Since `spark-pipelines` is built on top of `spark-submit`, it supports all `spar
 
 It also supports the pipeline-specific `--spec` parameter (see description above in the `run` section).
 
+## Querying the Pipeline Event Log
+
+A pipeline emits events as it runs: progress updates for each flow, failures, and the final state of the run. To keep a queryable record of these events, set `spark.sql.pipelines.eventLog.enabled` to `true`, for example in the `configuration` section of the pipeline spec:
+
+```yaml
+configuration:
+  spark.sql.pipelines.eventLog.enabled: "true"
+```
+
+Each run, including a dry run, then writes its events as JSON lines to its own file under `<storage>/_event_log/`, where `<storage>` is the `storage` location from the pipeline spec. Each event is flushed as it is written. On storage that doesn't support flushing, such as object stores, a run's file becomes visible when the run ends.
+
+Each event has the following fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | STRING | Unique ID of the event. |
+| `run_id` | STRING | ID of the run that emitted the event. All events of a run share it. |
+| `timestamp` | TIMESTAMP | Time the event was emitted. |
+| `level` | STRING | `INFO`, `WARN`, or `ERROR`. |
+| `event_type` | STRING | `flow_progress` or `run_progress`. |
+| `message` | STRING | Human-readable description of the event. |
+| `flow_name` | STRING | Fully qualified name of the flow, for flow events. |
+| `dataset_name` | STRING | Fully qualified name of the dataset, for flow events. |
+| `source_file` | STRING | Source file that defines the flow, if known. |
+| `source_line` | INT | Line in `source_file` that defines the flow, if known. |
+| `flow_status` | STRING | New state of the flow, for `flow_progress` events: `QUEUED`, `PLANNING`, `STARTING`, `RUNNING`, `COMPLETED`, `FAILED`, `SKIPPED`, `STOPPED`, `EXCLUDED`, or `IDLE`. |
+| `run_state` | STRING | Final state of the run, for `run_progress` events: `COMPLETED`, `FAILED`, or `CANCELED`. |
+| `error_class` | STRING | Error condition of the failure, if the event has a Spark error. |
+| `error_message` | STRING | Messages of the failure and its causes, if the event has an error. |
+
+For example, to list failed flows across all runs:
+
+```python
+schema = """
+  id STRING, run_id STRING, timestamp TIMESTAMP, level STRING, event_type STRING,
+  message STRING, flow_name STRING, dataset_name STRING, source_file STRING,
+  source_line INT, flow_status STRING, run_state STRING, error_class STRING,
+  error_message STRING
+"""
+events = spark.read.schema(schema).json("<storage>/_event_log")
+events.where("flow_status = 'FAILED'") \
+  .select("timestamp", "run_id", "flow_name", "error_class", "error_message") \
+  .orderBy("timestamp") \
+  .show(truncate=False)
+```
+
 ## Programming with SDP in Python
 
 SDP Python definitions are defined in the `pyspark.pipelines` module.

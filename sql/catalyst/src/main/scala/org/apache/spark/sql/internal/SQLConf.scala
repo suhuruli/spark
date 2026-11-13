@@ -9315,6 +9315,17 @@ object SQLConf {
       .createWithDefault(1000)
   }
 
+  val PIPELINES_EVENT_LOG_ENABLED = {
+    buildConf("spark.sql.pipelines.eventLog.enabled")
+      .doc("When true, each pipeline run writes the events it emits (flow progress, run " +
+        "progress and failures) as JSON lines to a file under `<storage>/_event_log/`, where " +
+        "`<storage>` is the storage root of the pipeline. The files can be queried with " +
+        "`spark.read.json`.")
+      .version("4.4.0")
+      .booleanConf
+      .createWithDefault(false)
+  }
+
   val HADOOP_LINE_RECORD_READER_ENABLED =
     buildConf("spark.sql.execution.datasources.hadoopLineRecordReader.enabled")
       .internal()
@@ -10976,6 +10987,8 @@ class SQLConf extends Serializable with Logging with SqlApiConf {
   }
 
   def maxFlowRetryAttempts: Int = getConf(SQLConf.PIPELINES_MAX_FLOW_RETRY_ATTEMPTS)
+
+  def pipelinesEventLogEnabled: Boolean = getConf(SQLConf.PIPELINES_EVENT_LOG_ENABLED)
 
   def hadoopLineRecordReaderEnabled: Boolean = getConf(SQLConf.HADOOP_LINE_RECORD_READER_ENABLED)
 

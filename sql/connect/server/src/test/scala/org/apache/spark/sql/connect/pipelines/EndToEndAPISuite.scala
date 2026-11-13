@@ -23,8 +23,10 @@ import java.util.concurrent.TimeUnit
 import scala.concurrent.duration.Duration
 
 import org.apache.spark.api.python.PythonUtils
+import org.apache.spark.sql.Row
 import org.apache.spark.sql.connect.{PythonTestDepsChecker, SparkConnectServerTest}
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.pipelines.logging.PipelineEventLogWriter
 import org.apache.spark.sql.pipelines.utils.{APITest, PipelineReference, PipelineSourceFile, PipelineTest, TestPipelineConfiguration, TestPipelineSpec}
 
 case class PipelineReferenceImpl(executionProcess: Process) extends PipelineReference
@@ -150,6 +152,26 @@ class EndToEndAPISuite extends PipelineTest with APITest with SparkConnectServer
     }
   }
 
+  test("event log enabled in the pipeline spec is written under the storage root") {
+    val pipelineSpec = TestPipelineSpec(
+      include = Seq("transformations/**"),
+      configuration = Map(SQLConf.PIPELINES_EVENT_LOG_ENABLED.key -> "true"))
+    val sources = Seq(
+      PipelineSourceFile(
+        name = "transformations/definition.sql",
+        contents = "CREATE MATERIALIZED VIEW mv AS SELECT 1 AS id;"))
+    awaitPipelineTermination(
+      createAndRunPipeline(TestPipelineConfiguration(pipelineSpec), sources))
+
+    val eventLogDir =
+      projectDir.resolve("storage").resolve(PipelineEventLogWriter.EVENT_LOG_DIR_NAME)
+    val events = spark.read.schema(PipelineEventLogWriter.SCHEMA).json(eventLogDir.toString)
+    checkAnswer(
+      events.where("event_type = 'run_progress'").select("run_state"),
+      Row("COMPLETED"))
+    assert(events.where("flow_status = 'COMPLETED' AND flow_name LIKE '%mv'").count() == 1)
+  }
+
   private def writePipelineSpecFile(spec: TestPipelineSpec): Path = {
     val libraries = spec.include
       .map { includePattern =>
@@ -157,6 +179,9 @@ class EndToEndAPISuite extends PipelineTest with APITest with SparkConnectServer
          |      include: "$includePattern"
          |""".stripMargin
       }
+      .mkString("\n")
+    val configuration = spec.configuration
+      .map { case (key, value) => s"""  "$key": "$value"""" }
       .mkString("\n")
 
     val pipelineSpec = s"""
@@ -167,6 +192,7 @@ class EndToEndAPISuite extends PipelineTest with APITest with SparkConnectServer
       |configuration:
       |  "spark.remote": "sc://localhost:$serverPort"
       |  "${SQLConf.ANALYZER_DUAL_RUN_LEGACY_AND_SINGLE_PASS_RESOLVER.key}": "false"
+      |$configuration
       |libraries:
       |$libraries
       |""".stripMargin
