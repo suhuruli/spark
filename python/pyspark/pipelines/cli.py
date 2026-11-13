@@ -30,6 +30,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generator, List, Mapping, Optional, Sequence
+from urllib.parse import urlparse
 
 import yaml
 
@@ -348,11 +349,21 @@ def run(
             full_refresh_all=full_refresh_all,
             refresh=refresh,
             dry=dry,
-            storage=spec.storage,
+            storage=resolve_storage(spec.storage, spec_path),
         )
         handle_pipeline_events(result_iter)
     finally:
         spark.stop()
+
+
+def resolve_storage(storage: str, spec_path: Path) -> str:
+    """Resolves a relative local `storage` path against the directory of the spec file.
+
+    Values with a URI scheme (e.g. file://, s3a://) or absolute paths are returned unchanged.
+    """
+    if urlparse(storage).scheme or Path(storage).is_absolute():
+        return storage
+    return (spec_path.parent / storage).resolve().as_uri()
 
 
 def parse_table_list(value: str) -> List[str]:

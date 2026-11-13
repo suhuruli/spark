@@ -36,6 +36,7 @@ if should_test_connect and have_yaml:
         find_pipeline_spec,
         load_pipeline_spec,
         register_definitions,
+        resolve_storage,
         run,
         unpack_pipeline_spec,
     )
@@ -441,6 +442,19 @@ class CLIUtilityTests(ReusedConnectTestCase):
             self.assertEqual(
                 context.exception.getCondition(), "CONFLICTING_PIPELINE_REFRESH_OPTIONS"
             )
+
+    def test_resolve_storage(self):
+        spec_path = Path("/path/to/project/spark-pipeline.yml")
+        self.assertEqual(
+            resolve_storage("pipeline-storage", spec_path),
+            Path("/path/to/project/pipeline-storage").resolve().as_uri(),
+        )
+        self.assertEqual(
+            resolve_storage("../shared/storage", spec_path),
+            Path("/path/to/shared/storage").resolve().as_uri(),
+        )
+        for storage in ["file:///abs/storage", "s3a://bucket/storage", "/abs/storage"]:
+            self.assertEqual(resolve_storage(storage, spec_path), storage)
 
     def test_parse_table_list_single_table(self):
         """Test parsing a single table name."""
