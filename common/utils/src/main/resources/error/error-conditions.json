@@ -5660,6 +5660,11 @@
           "ANALYZE TABLE(S) ... COMPUTE STATISTICS ... <ctx> must be either NOSCAN or empty."
         ]
       },
+      "AUTO_CDC_NON_STREAMING_SOURCE" : {
+        "message" : [
+          "The AUTO CDC source must be a streaming relation. Read the source as a stream, for example with STREAM(source_table)."
+        ]
+      },
       "COMMENT_ON_COLUMN_INCORRECT_IDENTIFIER" : {
         "message" : [
           "COMMENT ON COLUMN requires an identifier with at least two parts. Please qualify the column with the table name (e.g. `table.column`, `database.table.column`, or `catalog.database.table.column`)."
@@ -5763,6 +5768,11 @@
       "LATERAL_WITHOUT_SUBQUERY_OR_TABLE_VALUED_FUNC" : {
         "message" : [
           "LATERAL can only be used with subquery and table-valued functions."
+        ]
+      },
+      "MATERIALIZED_VIEW_WITHOUT_QUERY" : {
+        "message" : [
+          "CREATE MATERIALIZED VIEW requires a query. Add an AS clause with the query that defines the materialized view."
         ]
       },
       "MULTI_PART_NAME" : {
@@ -9798,6 +9808,41 @@
       "PARTITION_WITH_NESTED_COLUMN_IS_UNSUPPORTED" : {
         "message" : [
           "Invalid partitioning: <cols> is missing or is in a map or array."
+        ]
+      },
+      "PIPELINE_DATASET_AUTO_CDC_FOR_MATERIALIZED_VIEW" : {
+        "message" : [
+          "AUTO CDC in a CREATE MATERIALIZED VIEW statement. AUTO CDC is only supported for streaming tables. Use CREATE STREAMING TABLE instead."
+        ]
+      },
+      "PIPELINE_DATASET_BUCKETING" : {
+        "message" : [
+          "Bucketing in a CREATE <pipelineDatasetType> statement. Remove the bucket specification from the statement."
+        ]
+      },
+      "PIPELINE_DATASET_COLUMN_CONSTRAINTS" : {
+        "message" : [
+          "Column constraints in a CREATE <pipelineDatasetType> statement. Remove the CHECK, UNIQUE, PRIMARY KEY, and FOREIGN KEY constraints from the statement."
+        ]
+      },
+      "PIPELINE_DATASET_HIVE_SERDE" : {
+        "message" : [
+          "Hive SerDe format options in a CREATE <pipelineDatasetType> statement. Remove the ROW FORMAT clause and specify the data source with the USING clause instead."
+        ]
+      },
+      "PIPELINE_DATASET_LOCATION" : {
+        "message" : [
+          "The LOCATION clause in a CREATE <pipelineDatasetType> statement. The pipeline manages the storage location of its datasets. Remove the LOCATION clause from the statement."
+        ]
+      },
+      "PIPELINE_DATASET_OPTIONS" : {
+        "message" : [
+          "The OPTIONS clause in a CREATE <pipelineDatasetType> statement. Remove the OPTIONS list from the statement."
+        ]
+      },
+      "PIPELINE_DATASET_STORED_AS" : {
+        "message" : [
+          "The STORED AS clause in a CREATE <pipelineDatasetType> statement. Specify the data source with the USING clause instead."
         ]
       },
       "PIPE_OPERATOR_AGGREGATE_UNSUPPORTED_CASE" : {

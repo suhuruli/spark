@@ -1405,8 +1405,7 @@ class AstBuilder extends DataTypeAstBuilder
       val source = plan(params.source)
       if (!source.isStreaming) {
         withOrigin(params.source) {
-          operationNotAllowed(
-            "AUTO CDC source must be a streaming query, e.g. STREAM(<table>).", params.source)
+          throw QueryParsingErrors.autoCdcNonStreamingSourceError(params.source)
         }
       }
       val keys = visitIdentifierSeq(params.keys).map(UnresolvedAttribute.quoted)

@@ -28,9 +28,14 @@ class CreateMaterializedViewAsSelectParserSuite
   override val datasetSqlSyntax: String = "MATERIALIZED VIEW"
 
   test("Cannot create materialized view without subquery") {
-    val ex = intercept[ParseException] {
-      parser.parsePlan(s"CREATE $datasetSqlSyntax table")
-    }
-    assert(ex.getMessage.contains(s"Unable to find query for CREATE $datasetSqlSyntax statement."))
+    val sql = s"CREATE $datasetSqlSyntax table"
+    checkError(
+      exception = intercept[ParseException] {
+        parser.parsePlan(sql)
+      },
+      condition = "INVALID_SQL_SYNTAX.MATERIALIZED_VIEW_WITHOUT_QUERY",
+      parameters = Map.empty,
+      context = ExpectedContext(sql, 0, sql.length - 1)
+    )
   }
 }

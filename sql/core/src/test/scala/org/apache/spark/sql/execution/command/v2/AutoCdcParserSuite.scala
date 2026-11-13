@@ -864,9 +864,8 @@ class AutoCdcParserSuite extends CommandSuiteBase with AnalysisTest {
             |KEYS (id)
             |SEQUENCE BY ts""".stripMargin)
       },
-      condition = "_LEGACY_ERROR_TEMP_0035",
-      parameters = Map(
-        "message" -> "AUTO CDC source must be a streaming query, e.g. STREAM(<table>)."),
+      condition = "INVALID_SQL_SYNTAX.AUTO_CDC_NON_STREAMING_SOURCE",
+      parameters = Map.empty,
       queryContext = Array(ExpectedContext("source", 43, 48))
     )
   }
@@ -881,9 +880,8 @@ class AutoCdcParserSuite extends CommandSuiteBase with AnalysisTest {
             |KEYS (id)
             |SEQUENCE BY ts""".stripMargin)
       },
-      condition = "_LEGACY_ERROR_TEMP_0035",
-      parameters = Map(
-        "message" -> "AUTO CDC source must be a streaming query, e.g. STREAM(<table>)."),
+      condition = "INVALID_SQL_SYNTAX.AUTO_CDC_NON_STREAMING_SOURCE",
+      parameters = Map.empty,
       queryContext = Array(ExpectedContext("source", 49, 54))
     )
   }
@@ -952,9 +950,8 @@ class AutoCdcParserSuite extends CommandSuiteBase with AnalysisTest {
         |SEQUENCE BY ts""".stripMargin
     checkError(
       intercept[ParseException] { parser.parsePlan(sql) },
-      condition = "_LEGACY_ERROR_TEMP_0035",
-      parameters = Map(
-        "message" -> "AUTO CDC is only supported for STREAMING TABLE, not MATERIALIZED VIEW."),
+      condition = "UNSUPPORTED_FEATURE.PIPELINE_DATASET_AUTO_CDC_FOR_MATERIALIZED_VIEW",
+      parameters = Map.empty,
       queryContext = Array(ExpectedContext(sql, 0, sql.length - 1))
     )
   }
@@ -968,11 +965,8 @@ class AutoCdcParserSuite extends CommandSuiteBase with AnalysisTest {
         |SEQUENCE BY ts""".stripMargin
     checkError(
       intercept[ParseException] { parser.parsePlan(sql) },
-      condition = "_LEGACY_ERROR_TEMP_0035",
-      parameters = Map("message" ->
-        ("Pipeline datasets do not currently support column constraints. " +
-          "Please remove any CHECK, UNIQUE, PK, and FK constraints " +
-          "specified on the pipeline dataset.")),
+      condition = "UNSUPPORTED_FEATURE.PIPELINE_DATASET_COLUMN_CONSTRAINTS",
+      parameters = Map("pipelineDatasetType" -> "STREAMING TABLE"),
       queryContext = Array(ExpectedContext(sql, 0, sql.length - 1))
     )
   }
@@ -987,10 +981,8 @@ class AutoCdcParserSuite extends CommandSuiteBase with AnalysisTest {
         |SEQUENCE BY ts""".stripMargin
     checkError(
       intercept[ParseException] { parser.parsePlan(sql) },
-      condition = "_LEGACY_ERROR_TEMP_0035",
-      parameters = Map("message" ->
-        ("Bucketing is not supported for CREATE STREAMING TABLE statements. " +
-          "Please remove any bucket spec specified in the statement.")),
+      condition = "UNSUPPORTED_FEATURE.PIPELINE_DATASET_BUCKETING",
+      parameters = Map("pipelineDatasetType" -> "STREAMING TABLE"),
       queryContext = Array(ExpectedContext(sql, 0, sql.length - 1))
     )
   }
@@ -1005,10 +997,8 @@ class AutoCdcParserSuite extends CommandSuiteBase with AnalysisTest {
         |SEQUENCE BY ts""".stripMargin
     checkError(
       intercept[ParseException] { parser.parsePlan(sql) },
-      condition = "_LEGACY_ERROR_TEMP_0035",
-      parameters = Map("message" ->
-        ("Options are not supported for CREATE STREAMING TABLE statements. " +
-          "Please remove any OPTIONS lists specified in the statement.")),
+      condition = "UNSUPPORTED_FEATURE.PIPELINE_DATASET_OPTIONS",
+      parameters = Map("pipelineDatasetType" -> "STREAMING TABLE"),
       queryContext = Array(ExpectedContext(sql, 0, sql.length - 1))
     )
   }
@@ -1023,10 +1013,8 @@ class AutoCdcParserSuite extends CommandSuiteBase with AnalysisTest {
         |SEQUENCE BY ts""".stripMargin
     checkError(
       intercept[ParseException] { parser.parsePlan(sql) },
-      condition = "_LEGACY_ERROR_TEMP_0035",
-      parameters = Map("message" ->
-        ("Hive SerDe format options are not supported for " +
-          "CREATE STREAMING TABLE statements.")),
+      condition = "UNSUPPORTED_FEATURE.PIPELINE_DATASET_HIVE_SERDE",
+      parameters = Map("pipelineDatasetType" -> "STREAMING TABLE"),
       queryContext = Array(ExpectedContext(sql, 0, sql.length - 1))
     )
   }
@@ -1041,10 +1029,8 @@ class AutoCdcParserSuite extends CommandSuiteBase with AnalysisTest {
         |SEQUENCE BY ts""".stripMargin
     checkError(
       intercept[ParseException] { parser.parsePlan(sql) },
-      condition = "_LEGACY_ERROR_TEMP_0035",
-      parameters = Map("message" ->
-        ("Specifying location is not supported for CREATE STREAMING TABLE statements. " +
-          "The storage location for a pipeline dataset is managed by the pipeline itself.")),
+      condition = "UNSUPPORTED_FEATURE.PIPELINE_DATASET_LOCATION",
+      parameters = Map("pipelineDatasetType" -> "STREAMING TABLE"),
       queryContext = Array(ExpectedContext(sql, 0, sql.length - 1))
     )
   }
