@@ -1124,6 +1124,95 @@ When working with sinks, keep the following considerations in mind:
 - **Python API**: Sink functionality is available only through the Python API, not SQL
 - **Append-only**: Only append operations are supported; full refresh updates reset checkpoints but do not clean previously computed results
 
+## Using Unity Catalog
+
+Pipelines can read and write tables in an open-source [Unity Catalog](https://www.unitycatalog.io) server. Unity Catalog is exposed to Spark as a DSv2 catalog by the Unity Catalog Spark connector, and its managed tables are Delta tables. Materialized views and streaming tables defined in the pipeline become managed Delta tables in Unity Catalog.
+
+### Configuring Spark for Unity Catalog
+
+A pipeline needs two packages that are not part of Spark, both built for the Spark version that runs the pipeline:
+
+- Delta Lake: `io.delta:delta-spark_<spark version>_2.13`
+- The Unity Catalog Spark connector: `io.unitycatalog:unitycatalog-spark_<spark version>_2.13`
+
+Each Unity Catalog catalog is registered as a Spark catalog backed by `io.unitycatalog.spark.UCSingleCatalog`. The Spark catalog name must match the Unity Catalog catalog name. `spark.jars.packages` and `spark.sql.extensions` are static configurations, so pass them to `spark-pipelines` on the command line or in a properties file. The catalog configurations can be passed the same way or in the `configuration` section of the pipeline spec.
+
+A properties file for a catalog named `my_catalog` on a local server without authentication, for Spark 4.2:
+
+```
+spark.jars.packages io.delta:delta-spark_4.2_2.13:4.4.1,io.unitycatalog:unitycatalog-spark_4.2_2.13:0.7.0
+spark.sql.extensions io.delta.sql.DeltaSparkSessionExtension
+spark.sql.catalog.spark_catalog org.apache.spark.sql.delta.catalog.DeltaCatalog
+spark.sql.catalog.my_catalog io.unitycatalog.spark.UCSingleCatalog
+spark.sql.catalog.my_catalog.uri http://localhost:8080
+spark.sql.catalog.my_catalog.token
+```
+
+Set `token` to an access token when the server has authentication enabled. When it does not, set `token` to an empty value. The connector requires the key to be present.
+
+```bash
+spark-pipelines run --properties-file uc.properties
+```
+
+### Pipeline Spec for Unity Catalog
+
+Set `catalog` and `schema` in the pipeline spec to the Unity Catalog catalog and schema that unqualified dataset names resolve to. Both must already exist in Unity Catalog; pipelines do not create catalogs or schemas.
+
+`schema` is required. Catalogs created through the Unity Catalog API have no default schema, so a spec that sets only `catalog` fails with `PIPELINE_DEFAULT_SCHEMA_NOT_SPECIFIED`.
+
+Unity Catalog only supports Delta for managed tables. Either set `spark.sql.sources.default` to `delta` in the spec, or set `format="delta"` (Python) or `USING delta` (SQL) on every materialized view and streaming table. Without either, table creation fails with `Unity Catalog does not support non-Delta managed table.`
+
+```yaml
+name: my_pipeline
+libraries:
+  - glob:
+      include: transformations/**
+storage: file:///absolute/path/to/storage/dir
+catalog: my_catalog
+schema: sales
+configuration:
+  spark.sql.sources.default: delta
+```
+
+The managed tables are stored under the managed storage location of the catalog or schema, so the catalog or schema needs a storage root, and Spark needs access to it.
+
+### Datasets in Unity Catalog
+
+Unqualified names resolve to the spec's `catalog` and `schema`. Fully qualified `catalog.schema.table` names create datasets in, or read tables from, other schemas and catalogs. Existing Unity Catalog tables are read like any other table:
+
+```python
+from pyspark import pipelines as dp
+from pyspark.sql import DataFrame
+
+
+# Created as my_catalog.sales.orders_bronze.
+@dp.table
+def orders_bronze() -> DataFrame:
+    return spark.readStream.table("my_catalog.raw.orders")
+
+
+# Created as my_catalog.raw.orders_snapshot.
+@dp.materialized_view(name="my_catalog.raw.orders_snapshot")
+def orders_snapshot() -> DataFrame:
+    return spark.read.table("my_catalog.raw.orders")
+```
+
+```sql
+CREATE MATERIALIZED VIEW customer_totals AS
+SELECT customer, count(*) AS orders, sum(amount) AS total_amount
+FROM orders_bronze
+GROUP BY customer;
+```
+
+Streaming tables process only new data from their Delta sources on each run. `spark-pipelines run --full-refresh-all` or `--full-refresh <dataset>` truncates the tables and reprocesses all source data.
+
+A runnable example, including setup of the catalog, schemas and source table, is in `examples/src/main/python/pipelines/unity_catalog`.
+
+### Unity Catalog Limitations
+
+- **Persisted views**: `CREATE VIEW` in a pipeline replaces the view on every run. The Unity Catalog Spark connector does not support replacing views, so persisted views in Unity Catalog fail with `Replacing a view is not supported yet`. Use materialized views or temporary views instead.
+- **Auto CDC**: Delta tables do not implement the DSv2 `SupportsRowLevelOperations` interface, so Auto CDC flows cannot target them. See [Choosing a Target Format](#choosing-a-target-format).
+
 ## Important Considerations
 
 ### Python Considerations
