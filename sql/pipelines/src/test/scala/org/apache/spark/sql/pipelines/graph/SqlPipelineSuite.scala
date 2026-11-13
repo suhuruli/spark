@@ -95,6 +95,24 @@ class SqlPipelineSuite extends PipelineTest with SharedSparkSession {
     assert(namedFlow.destinationIdentifier == fullyQualifiedIdentifier("st"))
   }
 
+  test("SPARK-53748: CREATE OR REFRESH datasets are registered") {
+    val unresolvedDataflowGraph = unresolvedDataflowGraphFromSql(
+      sqlText = s"""
+                   |CREATE OR REFRESH MATERIALIZED VIEW mv AS SELECT 1;
+                   |CREATE OR REFRESH STREAMING TABLE st AS
+                   |SELECT * FROM STREAM $externalTable1Ident;
+                   |CREATE OR REFRESH STREAMING TABLE st2;
+                   |CREATE FLOW f AS INSERT INTO st2 BY NAME
+                   |SELECT * FROM STREAM $externalTable2Ident;
+                   |""".stripMargin
+    )
+    val resolvedDataflowGraph = resolveGraph(unresolvedDataflowGraph)
+
+    assert(resolvedDataflowGraph.tables.map(_.identifier).toSet ==
+      Set("mv", "st", "st2").map(fullyQualifiedIdentifier(_)))
+    assert(resolvedDataflowGraph.flows.size == 3)
+  }
+
   test("Duplicate table name across different SQL files fails") {
     val graphRegistrationContext = new TestGraphRegistrationContext(spark)
     val sqlGraphRegistrationContext = new SqlGraphRegistrationContext(graphRegistrationContext)

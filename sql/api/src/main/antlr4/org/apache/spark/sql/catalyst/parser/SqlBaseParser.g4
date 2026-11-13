@@ -642,7 +642,7 @@ streamingTable
     ;
 
 createPipelineDatasetHeader
-    : CREATE
+    : CREATE (OR REFRESH)?
       (materializedView | streamingTable)
       (IF errorCapturingNot EXISTS)?
       identifierReference

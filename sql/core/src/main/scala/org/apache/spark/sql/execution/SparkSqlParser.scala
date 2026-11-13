@@ -1651,6 +1651,10 @@ class SparkSqlAstBuilder extends AstBuilder {
     }
 
     val ifNotExists = createPipelineDatasetHeaderCtx.EXISTS() != null
+    if (createPipelineDatasetHeaderCtx.REFRESH() != null && ifNotExists) {
+      throw operationNotAllowed("CREATE OR REFRESH and IF NOT EXISTS cannot be used together " +
+        s"in CREATE $syntaxTypeErrorStr statements.", ctx)
+    }
     val provider = Option(ctx.tableProvider).map(_.multipartIdentifier.getText)
     val (colDefs, colConstraints) = Option(ctx.tableElementList()).map(visitTableElementList)
       .getOrElse((Nil, Nil))

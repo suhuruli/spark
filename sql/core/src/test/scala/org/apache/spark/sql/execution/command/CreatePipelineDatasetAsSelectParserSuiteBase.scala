@@ -193,6 +193,28 @@ trait CreatePipelineDatasetAsSelectParserSuiteBase extends CommandSuiteBase {
     }
   }
 
+  test("SPARK-53748: CREATE OR REFRESH parses correctly") {
+    val plan = parser.parsePlan(
+      s"CREATE OR REFRESH $datasetSqlSyntax table1 AS SELECT * FROM input")
+    val cmd = plan.asInstanceOf[CreatePipelineDatasetAsSelect]
+    assert(cmd == parser.parsePlan(s"CREATE $datasetSqlSyntax table1 AS SELECT * FROM input"))
+    assert(!cmd.ifNotExists)
+  }
+
+  test("SPARK-53748: CREATE OR REFRESH cannot be combined with IF NOT EXISTS") {
+    val sql = s"CREATE OR REFRESH $datasetSqlSyntax IF NOT EXISTS table1 AS SELECT * FROM input"
+    val ex = intercept[ParseException] {
+      parser.parsePlan(sql)
+    }
+    checkError(
+      exception = ex,
+      condition = "_LEGACY_ERROR_TEMP_0035",
+      parameters = Map("message" -> ("CREATE OR REFRESH and IF NOT EXISTS cannot be used " +
+        s"together in CREATE $datasetSqlSyntax statements.")),
+      queryContext = ex.getQueryContext.map(toExpectedContext)
+    )
+  }
+
   test("Table properties parse correctly") {
     Seq(
       (s"CREATE $datasetSqlSyntax table1 TBLPROPERTIES(a=FALSE, b='long comment', c=100) AS " +
