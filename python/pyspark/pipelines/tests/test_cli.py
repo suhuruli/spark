@@ -15,10 +15,13 @@
 # limitations under the License.
 #
 
+import contextlib
+import io
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from pyspark.errors import PySparkException
 from pyspark.testing.connectutils import (
@@ -36,8 +39,10 @@ if should_test_connect and have_yaml:
         find_pipeline_spec,
         load_pipeline_spec,
         register_definitions,
+        release_line,
         run,
         unpack_pipeline_spec,
+        validate_server_version,
     )
     from pyspark.pipelines.tests.local_graph_element_registry import LocalGraphElementRegistry
 
@@ -525,6 +530,163 @@ class CLIUtilityTests(ReusedConnectTestCase):
                 context.exception.getMessageParameters(),
                 {"glob_pattern": "transformations/**/*.py"},
             )
+
+
+@unittest.skipIf(
+    not should_test_connect or not have_yaml,
+    connect_requirement_message or yaml_requirement_message,
+)
+class ServerVersionCheckTests(unittest.TestCase):
+    """Tests for the Spark Connect server version check that runs before pipeline registration."""
+
+    ENDPOINT = "sc://localhost:15002"
+
+    def test_release_line(self):
+        self.assertEqual(release_line("4.1.0"), (4, 1))
+        self.assertEqual(release_line("4.2.0-SNAPSHOT"), (4, 2))
+        self.assertEqual(release_line("4.1.0-preview1"), (4, 1))
+        self.assertEqual(release_line("5.0.0.dev0"), (5, 0))
+        self.assertIsNone(release_line("custom-build"))
+        self.assertIsNone(release_line("5"))
+
+    def test_rejects_server_from_earlier_release_line(self):
+        with self.assertRaises(PySparkException) as context:
+            validate_server_version(
+                client_version="5.0.0.dev0", server_version="4.1.0", endpoint=self.ENDPOINT
+            )
+        self.assertEqual(context.exception.getCondition(), "PIPELINE_SPARK_CONNECT_SERVER_TOO_OLD")
+        self.assertEqual(
+            context.exception.getMessageParameters(),
+            {
+                "client_version": "5.0.0.dev0",
+                "server_version": "4.1.0",
+                "endpoint": self.ENDPOINT,
+                "required_version": "5.0",
+            },
+        )
+        message = context.exception.getMessage()
+        self.assertIn("5.0.0.dev0", message)
+        self.assertIn("4.1.0", message)
+        self.assertIn(self.ENDPOINT, message)
+        self.assertIn("--remote", message)
+
+    def test_rejects_server_from_earlier_minor_release(self):
+        with self.assertRaises(PySparkException) as context:
+            validate_server_version(
+                client_version="4.2.0", server_version="4.1.3", endpoint=self.ENDPOINT
+            )
+        self.assertEqual(context.exception.getCondition(), "PIPELINE_SPARK_CONNECT_SERVER_TOO_OLD")
+
+    def test_accepts_server_from_same_release_line(self):
+        # Patch releases do not change the protocol, so the check must not refuse or warn.
+        for client_version, server_version in [
+            ("4.2.0", "4.2.0"),
+            ("4.2.1", "4.2.0"),
+            ("4.2.0", "4.2.3"),
+            ("5.0.0.dev0", "5.0.0-SNAPSHOT"),
+            ("4.1.0", "4.1.0-preview1"),
+        ]:
+            with self.subTest(client_version=client_version, server_version=server_version):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    validate_server_version(client_version, server_version, self.ENDPOINT)
+                self.assertEqual(output.getvalue(), "")
+
+    def test_warns_about_server_from_newer_release_line(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            validate_server_version(
+                client_version="4.1.0", server_version="4.2.0", endpoint=self.ENDPOINT
+            )
+        self.assertIn("WARNING", output.getvalue())
+        self.assertIn("4.1.0", output.getvalue())
+        self.assertIn("4.2.0", output.getvalue())
+        self.assertIn(self.ENDPOINT, output.getvalue())
+
+    def test_skips_check_for_unparseable_versions(self):
+        for client_version, server_version in [("custom-build", "4.1.0"), ("4.2.0", "unknown")]:
+            with self.subTest(client_version=client_version, server_version=server_version):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    validate_server_version(client_version, server_version, self.ENDPOINT)
+                self.assertEqual(output.getvalue(), "")
+
+    @contextlib.contextmanager
+    def _mocked_session(self, server_version):
+        """Replace the session the CLI builds with a mock that reports the given server version,
+        and stub out the pipeline commands so no Spark Connect server is needed.
+        """
+        spark = mock.MagicMock()
+        spark.version = server_version
+        spark.client._builder.endpoint = "localhost:15002"
+        builder = mock.MagicMock()
+        builder.config.return_value = builder
+        builder.getOrCreate.return_value = spark
+        with (
+            mock.patch("pyspark.pipelines.cli.SparkSession") as session_cls,
+            mock.patch(
+                "pyspark.pipelines.cli.create_dataflow_graph", return_value="graph_id"
+            ) as create_dataflow_graph,
+            mock.patch("pyspark.pipelines.cli.start_run") as start_run,
+            mock.patch("pyspark.pipelines.cli.handle_pipeline_events"),
+        ):
+            session_cls.builder = builder
+            yield spark, create_dataflow_graph, start_run
+
+    def _write_spec(self, temp_dir):
+        spec_path = Path(temp_dir) / "spark-pipeline.yaml"
+        spec_path.write_text('{"name": "test_pipeline", "storage": "storage_path"}')
+        return spec_path
+
+    def test_run_fails_before_registering_when_server_is_older(self):
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            self._mocked_session("4.1.0") as (
+                spark,
+                create_dataflow_graph,
+                start_run,
+            ),
+        ):
+            with self.assertRaises(PySparkException) as context:
+                run(
+                    spec_path=self._write_spec(temp_dir),
+                    full_refresh=[],
+                    full_refresh_all=False,
+                    refresh=[],
+                    dry=True,
+                )
+            self.assertEqual(
+                context.exception.getCondition(), "PIPELINE_SPARK_CONNECT_SERVER_TOO_OLD"
+            )
+            self.assertEqual(
+                context.exception.getMessageParameters()["endpoint"], "sc://localhost:15002"
+            )
+            create_dataflow_graph.assert_not_called()
+            start_run.assert_not_called()
+            spark.stop.assert_called_once()
+
+    def test_run_continues_when_server_is_from_same_release_line(self):
+        from pyspark.version import __version__
+
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            self._mocked_session(__version__) as (
+                spark,
+                create_dataflow_graph,
+                start_run,
+            ),
+        ):
+            run(
+                spec_path=self._write_spec(temp_dir),
+                full_refresh=[],
+                full_refresh_all=False,
+                refresh=[],
+                dry=True,
+            )
+            create_dataflow_graph.assert_called_once()
+            start_run.assert_called_once()
+            self.assertTrue(start_run.call_args.kwargs["dry"])
+            spark.stop.assert_called_once()
 
 
 if __name__ == "__main__":

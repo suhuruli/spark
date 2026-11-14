@@ -26,10 +26,11 @@ import argparse
 import glob
 import importlib.util
 import os
+import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Generator, List, Mapping, Optional, Sequence
+from typing import Any, Generator, List, Mapping, Optional, Sequence, Tuple, cast
 
 import yaml
 
@@ -51,6 +52,7 @@ from pyspark.pipelines.spark_connect_pipeline import (
     start_run,
 )
 from pyspark.sql import SparkSession
+from pyspark.version import __version__
 
 PIPELINE_SPEC_FILE_NAMES = ["spark-pipeline.yaml", "spark-pipeline.yml"]
 
@@ -283,6 +285,57 @@ def change_dir(path: Path) -> Generator[None, None, None]:
         os.chdir(prev)
 
 
+def release_line(version: str) -> Optional[Tuple[int, int]]:
+    """Return the `(major, minor)` release line of a Spark version string such as `4.1.0`,
+    `4.2.0-SNAPSHOT` or `5.0.0.dev0`, or None if the string does not start with `major.minor`.
+    """
+    match = re.match(r"(\d+)\.(\d+)", version)
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def validate_server_version(client_version: str, server_version: str, endpoint: str) -> None:
+    """Check that the Spark Connect server runs a Spark release this CLI can talk to.
+
+    The pipeline protocol gains new messages in minor releases, so a server from an earlier
+    release line than the CLI rejects pipeline registration with an opaque protocol error such as
+    `InvalidPlanInput: RELTYPE_NOT_SET`. This typically happens when a Spark Connect server from
+    an older installation is still listening on the endpoint the CLI was pointed at, such as the
+    default `sc://localhost:15002`. Patch releases do not change the protocol, so any server from
+    the same release line is accepted.
+    A server from a newer release line accepts older clients, so that case only logs a warning.
+
+    :param client_version: The Spark version of this CLI.
+    :param server_version: The Spark version reported by the Spark Connect server.
+    :param endpoint: The Spark Connect endpoint the CLI is connected to, for the error message.
+    """
+    client_line = release_line(client_version)
+    server_line = release_line(server_version)
+    if client_line is None or server_line is None:
+        # A custom version string tells nothing about compatibility, so let the run proceed.
+        return
+
+    required_version = f"{client_line[0]}.{client_line[1]}"
+    if server_line < client_line:
+        raise PySparkException(
+            errorClass="PIPELINE_SPARK_CONNECT_SERVER_TOO_OLD",
+            messageParameters={
+                "client_version": client_version,
+                "server_version": server_version,
+                "endpoint": endpoint,
+                "required_version": required_version,
+            },
+        )
+    if server_line > client_line:
+        log_with_curr_timestamp(
+            f"WARNING: spark-pipelines is running Spark {client_version}, but the Spark Connect "
+            f"server at {endpoint} is running Spark {server_version}. A newer server normally "
+            "accepts an older client, but if this run fails with a protocol error, use --remote "
+            f"to point spark-pipelines at a Spark Connect server running Spark {required_version}."
+        )
+
+
 def run(
     spec_path: Path,
     full_refresh: Sequence[str],
@@ -328,6 +381,16 @@ def run(
     # Stop the session even if graph creation, registration, or the run itself fails, so a failure
     # after the session is created does not leak it.
     try:
+        # Fail with a clear message before sending any pipeline command if the session ended up on
+        # a Spark Connect server from an older release, for example one that is still listening on
+        # the default endpoint. Cast because mypy seems to think `spark` is a function, not an
+        # object. Likely related to SPARK-47544.
+        validate_server_version(
+            client_version=__version__,
+            server_version=spark.version,
+            endpoint=f"sc://{cast(Any, spark).client._builder.endpoint}",
+        )
+
         log_with_curr_timestamp("Creating dataflow graph...")
         dataflow_graph_id = create_dataflow_graph(
             spark,
