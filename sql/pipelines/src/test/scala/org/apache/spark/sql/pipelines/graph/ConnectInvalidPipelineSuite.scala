@@ -491,6 +491,54 @@ class ConnectInvalidPipelineSuite extends PipelineTest with SharedSparkSession {
     )
   }
 
+  test("Streaming read of a materialized view in the same graph fails validation") {
+    val session = spark
+    import session.implicits._
+
+    val graph = new TestGraphRegistrationContext(spark) {
+      registerMaterializedView("mv", query = dfFlowFunc(Seq(1, 2).toDF("x")))
+      registerTable("st", query = Option(readStreamFlowFunc("mv")))
+    }.resolveToDataflowGraph()
+
+    val ex = intercept[AnalysisException] {
+      validateGraph(graph)
+    }
+
+    checkError(
+      exception = ex,
+      condition = "INVALID_FLOW_QUERY_TYPE.STREAMING_READ_OF_MATERIALIZED_VIEW",
+      parameters = Map(
+        "flowIdentifier" -> fullyQualifiedIdentifier("st").quotedString,
+        "tableIdentifier" -> fullyQualifiedIdentifier("mv").quotedString
+      )
+    )
+  }
+
+  test("Streaming read of a materialized view through a temporary view fails validation") {
+    val session = spark
+    import session.implicits._
+
+    val graph = new TestGraphRegistrationContext(spark) {
+      registerMaterializedView("mv", query = dfFlowFunc(Seq(1, 2).toDF("x")))
+      registerTemporaryView("v", query = readStreamFlowFunc("mv"))
+      registerTable("st", query = Option(readStreamFlowFunc("v")))
+    }.resolveToDataflowGraph()
+
+    val ex = intercept[AnalysisException] {
+      validateGraph(graph)
+    }
+
+    // The error names the flow that actually performs the streaming read, i.e. the view's flow.
+    checkError(
+      exception = ex,
+      condition = "INVALID_FLOW_QUERY_TYPE.STREAMING_READ_OF_MATERIALIZED_VIEW",
+      parameters = Map(
+        "flowIdentifier" -> fullyQualifiedIdentifier("v", isTemporaryView = true).quotedString,
+        "tableIdentifier" -> fullyQualifiedIdentifier("mv").quotedString
+      )
+    )
+  }
+
   test("Once flow backed by streaming relation fails validation") {
     val session = spark
     import session.implicits._

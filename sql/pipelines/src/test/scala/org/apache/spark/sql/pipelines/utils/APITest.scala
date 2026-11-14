@@ -98,23 +98,25 @@ trait APITest
     val pipelineSpec =
       TestPipelineSpec(include = Seq("transformations/mvs/**", "transformations/st.sql"))
     val pipelineConfig = TestPipelineConfiguration(pipelineSpec)
+    spark.sql("CREATE TABLE src AS SELECT * FROM RANGE(5)")
     val sources = Seq(
       PipelineSourceFile(
         name = "transformations/st.sql",
         contents = s"""
                      |CREATE STREAMING TABLE st;
-                     |CREATE FLOW f AS INSERT INTO st BY NAME SELECT * FROM STREAM mv WHERE id > 2;
+                     |CREATE FLOW f AS INSERT INTO st BY NAME SELECT * FROM STREAM src WHERE id > 2;
                      |""".stripMargin),
       PipelineSourceFile(
         name = "transformations/mvs/mv.sql",
         contents = s"""
                      |CREATE MATERIALIZED VIEW mv
-                     |AS SELECT * FROM RANGE(5);
+                     |AS SELECT * FROM st;
                      |""".stripMargin))
     val pipeline = createAndRunPipeline(pipelineConfig, sources)
     awaitPipelineTermination(pipeline)
 
     checkAnswer(spark.sql(s"SELECT * FROM st"), Seq(Row(3), Row(4)))
+    checkAnswer(spark.sql(s"SELECT * FROM mv"), Seq(Row(3), Row(4)))
   }
 
   test("SQL Pipeline with CTE") {
@@ -201,6 +203,7 @@ trait APITest
     val pipelineSpec =
       TestPipelineSpec(include = Seq("transformations/**"))
     val pipelineConfig = TestPipelineConfiguration(pipelineSpec)
+    spark.sql("CREATE TABLE src AS SELECT * FROM RANGE(5)")
     val sources = Seq(
       PipelineSourceFile(
         name = "transformations/definition.sql",
@@ -208,7 +211,7 @@ trait APITest
            |CREATE MATERIALIZED VIEW mv TBLPROPERTIES ('prop1'='foo1', 'prop2'='bar2')
            |AS SELECT 1;
            |CREATE STREAMING TABLE st TBLPROPERTIES ('prop3'='foo3', 'prop4'='bar4')
-           |AS SELECT * FROM STREAM(mv);
+           |AS SELECT * FROM STREAM(src);
            |""".stripMargin))
 
     val pipeline = createAndRunPipeline(pipelineConfig, sources)
@@ -229,12 +232,13 @@ trait APITest
     val pipelineSpec =
       TestPipelineSpec(include = Seq("transformations/**"))
     val pipelineConfig = TestPipelineConfiguration(pipelineSpec)
+    spark.sql("CREATE TABLE src AS SELECT * FROM RANGE(5)")
     val sources = Seq(
       PipelineSourceFile(
         name = "transformations/definition.sql",
         contents = """
                |CREATE MATERIALIZED VIEW a (id LONG COMMENT 'comment') AS SELECT * FROM RANGE(5);
-               |CREATE STREAMING TABLE b (id LONG COMMENT 'comment') AS SELECT * FROM STREAM a;
+               |CREATE STREAMING TABLE b (id LONG COMMENT 'comment') AS SELECT * FROM STREAM src;
                |""".stripMargin))
 
     val pipeline = createAndRunPipeline(pipelineConfig, sources)
@@ -256,12 +260,13 @@ trait APITest
     val pipelineSpec =
       TestPipelineSpec(include = Seq("transformations/**"))
     val pipelineConfig = TestPipelineConfiguration(pipelineSpec)
+    spark.sql("CREATE TABLE src AS SELECT * FROM RANGE(5)")
     val sources = Seq(
       PipelineSourceFile(
         name = "transformations/definition.sql",
         contents = """
                      |CREATE STREAMING TABLE c;
-                     |CREATE MATERIALIZED VIEW a AS SELECT * FROM RANGE(5);
+                     |CREATE MATERIALIZED VIEW a AS SELECT * FROM b;
                      |""".stripMargin),
       PipelineSourceFile(
         name = "transformations/definition.py",
@@ -273,13 +278,14 @@ trait APITest
                      |def flow():
                      |  return spark.readStream.table("b").filter("id >= 3")
                      |
-                     |@dp.materialized_view
+                     |@dp.table
                      |def b():
-                     |  return spark.read.table("a")
+                     |  return spark.readStream.table("src")
                      |""".stripMargin))
 
     val pipeline = createAndRunPipeline(pipelineConfig, sources)
     awaitPipelineTermination(pipeline)
+    checkAnswer(spark.sql(s"SELECT * FROM a"), Seq(Row(0), Row(1), Row(2), Row(3), Row(4)))
     checkAnswer(spark.sql(s"SELECT * FROM b"), Seq(Row(0), Row(1), Row(2), Row(3), Row(4)))
     checkAnswer(spark.sql(s"SELECT * FROM c"), Seq(Row(3), Row(4)))
   }
@@ -287,18 +293,19 @@ trait APITest
   test("Pipeline referencing internal datasets") {
     val pipelineSpec =
       TestPipelineSpec(include =
-        Seq("transformations/mv.py", "transformations/st.py", "transformations/definition.sql"))
+        Seq("transformations/src.py", "transformations/st.py", "transformations/definition.sql"))
     val pipelineConfig = TestPipelineConfiguration(pipelineSpec)
+    spark.sql("CREATE TABLE ext_src AS SELECT * FROM RANGE(5)")
     val sources = Seq(
       PipelineSourceFile(
-        name = "transformations/mv.py",
+        name = "transformations/src.py",
         contents = """
                      |from pyspark import pipelines as dp
                      |from pyspark.sql import DataFrame
                      |
-                     |@dp.materialized_view
+                     |@dp.table
                      |def src():
-                     |  return spark.range(5)
+                     |  return spark.readStream.table("ext_src")
                      |""".stripMargin),
       PipelineSourceFile(
         name = "transformations/st.py",
@@ -416,6 +423,7 @@ trait APITest
     val pipelineSpec =
       TestPipelineSpec(include = Seq("transformations/**"))
     val pipelineConfig = TestPipelineConfiguration(pipelineSpec)
+    spark.sql("CREATE TABLE ext_src AS SELECT * FROM RANGE(5)")
     val sources = Seq(
       PipelineSourceFile(
         name = "transformations/st.py",
@@ -431,7 +439,7 @@ trait APITest
            |
            |@dp.append_flow(target = "a", name = "append_to_a")
            |def flow():
-           |  return spark.readStream.table("src")
+           |  return spark.readStream.table("ext_src")
            |""".stripMargin),
       PipelineSourceFile(
         name = "transformations/mv.py",
@@ -440,17 +448,18 @@ trait APITest
            |from pyspark.sql import DataFrame
            |
            |@dp.materialized_view(
-           |  name = "src",
-           |  comment = "source table",
+           |  name = "mv",
+           |  comment = "materialized view over a",
            |  schema = "id LONG"
            |)
            |def irrelevant():
-           |  return spark.range(5)
+           |  return spark.read.table("a")
            |""".stripMargin))
     val pipeline = createAndRunPipeline(pipelineConfig, sources)
     awaitPipelineTermination(pipeline)
 
     checkAnswer(spark.sql(s"SELECT * FROM a"), Seq(Row(0), Row(1), Row(2), Row(3), Row(4)))
+    checkAnswer(spark.sql(s"SELECT * FROM mv"), Seq(Row(0), Row(1), Row(2), Row(3), Row(4)))
   }
 
   test("Python Pipeline with temporary_view") {
@@ -543,6 +552,7 @@ trait APITest
     val pipelineSpec =
       TestPipelineSpec(include = Seq("transformations/**"))
     val pipelineConfig = TestPipelineConfiguration(pipelineSpec)
+    spark.sql("CREATE TABLE src AS SELECT * FROM RANGE(5)")
     val sources = Seq(
       PipelineSourceFile(
         name = "transformations/definition.py",
@@ -557,7 +567,7 @@ trait APITest
                      |
                      |@dp.table(partition_cols = ["id_mod"])
                      |def st():
-                     |  return spark.readStream.table("mv")
+                     |  return spark.readStream.table("src").withColumn("id_mod", col("id") % 2)
                      |""".stripMargin))
     val pipeline = createAndRunPipeline(pipelineConfig, sources)
     awaitPipelineTermination(pipeline)
@@ -574,6 +584,7 @@ trait APITest
     val pipelineSpec =
       TestPipelineSpec(include = Seq("transformations/**"))
     val pipelineConfig = TestPipelineConfiguration(pipelineSpec)
+    spark.sql("CREATE TABLE src AS SELECT * FROM RANGE(10)")
     val sources = Seq(
       PipelineSourceFile(
         name = "transformations/definition.py",
@@ -591,7 +602,10 @@ trait APITest
                      |
                      |@dp.table(cluster_by = ["cluster_col1"])
                      |def st():
-                     |  return spark.readStream.table("mv")
+                     |  df = spark.readStream.table("src")
+                     |  df = df.withColumn("cluster_col1", col("id") % 3)
+                     |  df = df.withColumn("cluster_col2", col("id") % 2)
+                     |  return df
                      |""".stripMargin))
     val pipeline = createAndRunPipeline(pipelineConfig, sources)
     awaitPipelineTermination(pipeline)

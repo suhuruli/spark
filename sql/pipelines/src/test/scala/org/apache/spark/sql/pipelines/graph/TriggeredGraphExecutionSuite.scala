@@ -101,8 +101,12 @@ class TriggeredGraphExecutionSuite extends ExecutionTest with SharedSparkSession
     val session = spark
     import session.implicits._
 
+    // `a` is read as a stream by the view `c`, so it must be a streaming table rather than a
+    // materialized view.
+    val ints: MemoryStream[Int] = MemoryStream[Int]
+    ints.addData(1, 2)
     val pipelineDef = new TestGraphRegistrationContext(spark) {
-      registerMaterializedView("a", query = dfFlowFunc(Seq(1, 2).toDF("x")))
+      registerTable("a", query = Option(dfFlowFunc(ints.toDF().select($"value" as "x"))))
       registerMaterializedView("b", query = readFlowFunc("a"))
       registerView("c", query = readStreamFlowFunc("a"))
       registerTable("d", query = Option(readStreamFlowFunc("c")))
@@ -137,7 +141,6 @@ class TriggeredGraphExecutionSuite extends ExecutionTest with SharedSparkSession
       identifier = fullyQualifiedIdentifier("a"),
       expectedFlowProgressStatus = Seq(
         (EventLevel.INFO, FlowStatus.QUEUED),
-        (EventLevel.INFO, FlowStatus.PLANNING),
         (EventLevel.INFO, FlowStatus.STARTING),
         (EventLevel.INFO, FlowStatus.RUNNING),
         (EventLevel.INFO, FlowStatus.COMPLETED)

@@ -188,12 +188,16 @@ class PythonPipelineSuite
     // commit (`ManifestFileCommitProtocol`: "Race while writing batch 0"), which made this test
     // flaky. Keeping each flow on a separate destination removes the race without changing what the
     // test verifies (source-code-location propagation for an append flow).
+    //
+    // The streaming flows read an external table rather than the materialized views, since a
+    // streaming read of a materialized view defined in the same pipeline is rejected.
+    sql("CREATE TABLE spark_catalog.default.src AS SELECT * FROM RANGE(5)")
     val unresolvedGraph = buildGraph(pythonText = """
         |@dp.table(
         | comment = 'my table'
         |)
         |def table1():
-        |    return spark.readStream.table('mv')
+        |    return spark.readStream.table('spark_catalog.default.src')
         |
         |@dp.materialized_view
         |def mv2():
@@ -208,7 +212,7 @@ class PythonPipelineSuite
         | target = 'st2'
         |)
         |def standalone_flow1():
-        |   return spark.readStream.table('mv2')
+        |   return spark.readStream.table('spark_catalog.default.src')
         |
         |dp.create_streaming_table('st2')
         |""".stripMargin)
@@ -300,9 +304,9 @@ class PythonPipelineSuite
         |def d():
         |  return spark.read.table("a")
         |
-        |@dp.materialized_view()
+        |@dp.table()
         |def a():
-        |  return spark.range(5)
+        |  return spark.readStream.format("rate").load()
         |""".stripMargin)
     val resolvedGraph = graph.resolve(sessionCaseSensitive).validate(sessionCaseSensitive)
     assert(resolvedGraph.tables.size == 4)
@@ -360,9 +364,9 @@ class PythonPipelineSuite
 
   test("referencing internal datasets") {
     val graph = buildGraph("""
-      |@dp.materialized_view
+      |@dp.table
       |def src():
-      |  return spark.range(5)
+      |  return spark.readStream.format("rate").load()
       |
       |@dp.materialized_view
       |def a():
@@ -395,21 +399,19 @@ class PythonPipelineSuite
 
     val (streamingFlows, batchFlows) = graph.resolvedFlows.partition(_.df.isStreaming)
     assert(
-      batchFlows.map(_.identifier).toSet == Set(
-        graphIdentifier("src"),
-        graphIdentifier("a"),
-        graphIdentifier("c")))
+      batchFlows.map(_.identifier).toSet == Set(graphIdentifier("a"), graphIdentifier("c")))
     assert(
       streamingFlows.map(_.identifier).toSet ==
-        Set(graphIdentifier("b"), graphIdentifier("d")))
+        Set(graphIdentifier("src"), graphIdentifier("b"), graphIdentifier("d")))
   }
 
   test("SPARK-60494: referencing internal datasets through DataFrame arguments of spark.sql") {
     // `d` and `e` have the SQL with DataFrame arguments under another relation.
+    sql("CREATE TABLE spark_catalog.default.ext_src AS SELECT * FROM RANGE(5)")
     val unresolvedGraph = buildGraph("""
-      |@dp.materialized_view
+      |@dp.table
       |def src():
-      |  return spark.range(5)
+      |  return spark.readStream.table("spark_catalog.default.ext_src")
       |
       |@dp.temporary_view
       |def view_src():
@@ -892,7 +894,8 @@ class PythonPipelineSuite
   }
 
   test("MV/ST with partition columns works") {
-    withTable("mv", "st") {
+    withTable("mv", "st", "src") {
+      sql("CREATE TABLE spark_catalog.default.src AS SELECT * FROM RANGE(5)")
       val graph = buildGraph("""
             |from pyspark.sql.functions import col
             |
@@ -902,7 +905,8 @@ class PythonPipelineSuite
             |
             |@dp.table(partition_cols = ["id_mod"])
             |def st():
-            |  return spark.readStream.table("mv")
+            |  return spark.readStream.table("spark_catalog.default.src") \
+            |    .withColumn("id_mod", col("id") % 2)
             |""".stripMargin)
 
       val updateContext =
@@ -1662,7 +1666,8 @@ class PythonPipelineSuite
   }
 
   test("empty cluster_by list should work and create table with no clustering") {
-    withTable("mv", "st") {
+    withTable("mv", "st", "src") {
+      sql("CREATE TABLE spark_catalog.default.src AS SELECT * FROM RANGE(5)")
       val graph = buildGraph("""
             |from pyspark.sql.functions import col
             |
@@ -1672,7 +1677,8 @@ class PythonPipelineSuite
             |
             |@dp.table(cluster_by = [])
             |def st():
-            |  return spark.readStream.table("mv")
+            |  return spark.readStream.table("spark_catalog.default.src") \
+            |    .withColumn("id_mod", col("id") % 2)
             |""".stripMargin)
       val updateContext =
         new PipelineUpdateContextImpl(graph, eventCallback = _ => (), storageRoot = storageRoot)

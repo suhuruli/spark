@@ -4566,6 +4566,11 @@
           "Streaming tables may only be defined by streaming relations, but the flow <flowIdentifier> attempts to write a batch relation to the streaming table <tableIdentifier>. Consider using the STREAM operator in Spark-SQL to convert the batch relation into a streaming relation, or populating the streaming table with an append once-flow instead."
         ]
       },
+      "STREAMING_READ_OF_MATERIALIZED_VIEW" : {
+        "message" : [
+          "Materialized views are recomputed from scratch on every pipeline update, so they cannot be read as a stream, but the flow <flowIdentifier> attempts to perform a streaming read of the materialized view <tableIdentifier>. Read the materialized view with a batch read instead, or define the upstream dataset as a streaming table."
+        ]
+      },
       "STREAMING_RELATION_FOR_MATERIALIZED_VIEW" : {
         "message" : [
           "Materialized views may only be defined by a batch relation, but the flow <flowIdentifier> attempts to write a streaming relation to the materialized view <tableIdentifier>."

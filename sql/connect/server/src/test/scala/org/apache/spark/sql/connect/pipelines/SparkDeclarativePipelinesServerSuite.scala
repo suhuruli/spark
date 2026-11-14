@@ -465,11 +465,12 @@ class SparkDeclarativePipelinesServerSuite
     withRawBlockingStub { implicit stub =>
       val graphId = createDataflowGraph(stub)
 
+      sql("CREATE TABLE spark_catalog.default.src AS SELECT * FROM RANGE(5)")
       val pipeline = new TestPipelineDefinition(graphId) {
         createTable(
           name = "tableA",
-          outputType = OutputType.MATERIALIZED_VIEW,
-          sql = Some("SELECT * FROM RANGE(5)"))
+          outputType = OutputType.TABLE,
+          sql = Some("SELECT * FROM STREAM spark_catalog.default.src"))
         createTable(
           name = "tableB",
           outputType = OutputType.TABLE,
@@ -495,16 +496,17 @@ class SparkDeclarativePipelinesServerSuite
 
       sql(s"CREATE SCHEMA IF NOT EXISTS spark_catalog.`curr`")
       sql(s"CREATE SCHEMA IF NOT EXISTS spark_catalog.`other`")
+      sql("CREATE TABLE spark_catalog.default.src AS SELECT * FROM RANGE(5)")
 
       val pipeline = new TestPipelineDefinition(graphId) {
         createTable(
           name = "curr.tableA",
           outputType = proto.OutputType.MATERIALIZED_VIEW,
-          sql = Some("SELECT * FROM RANGE(5)"))
+          sql = Some("SELECT * FROM curr.tableB"))
         createTable(
           name = "curr.tableB",
           outputType = proto.OutputType.TABLE,
-          sql = Some("SELECT * FROM STREAM curr.tableA"))
+          sql = Some("SELECT * FROM STREAM spark_catalog.default.src"))
         createView(name = "viewC", sql = "SELECT * FROM curr.tableB")
         createTable(
           name = "other.tableD",

@@ -185,6 +185,33 @@ trait GraphValidations extends Logging {
     }
   }
 
+  /**
+   * Validate that no flow performs a streaming read of a materialized view defined in this graph.
+   * A materialized view is recomputed from scratch on every update, so its backing files are
+   * replaced rather than appended to; a streaming read of it would therefore re-ingest the whole
+   * view on every update instead of only the new rows. Reading a materialized view with a batch
+   * read, and reading a streaming table with either kind of read, remain valid. Tables that are
+   * not defined in this graph are not checked, since the pipeline cannot tell how they are
+   * maintained.
+   */
+  protected[graph] def validateNoStreamingReadOfMaterializedView(): Unit = {
+    resolvedFlows.foreach { flow =>
+      flow.funcResult.streamingInputs.toSeq
+        .map(_.input.identifier)
+        .sortBy(_.unquotedString)
+        .find(inputIdentifier => table.get(inputIdentifier).exists(!_.isStreamingTable))
+        .foreach { materializedViewIdentifier =>
+          throw new AnalysisException(
+            errorClass = "INVALID_FLOW_QUERY_TYPE.STREAMING_READ_OF_MATERIALIZED_VIEW",
+            messageParameters = Map(
+              "flowIdentifier" -> flow.identifier.quotedString,
+              "tableIdentifier" -> materializedViewIdentifier.quotedString
+            )
+          )
+        }
+    }
+  }
+
   /** Throws an exception if the flows in this graph are not topologically sorted. */
   protected[graph] def validateGraphIsTopologicallySorted(): Unit = {
     val visitedNodes = mutable.Set.empty[TableIdentifier] // Set of visited nodes

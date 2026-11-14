@@ -68,6 +68,8 @@ A dataset is a queryable object that's the output of one of more flows within a 
 - **Materialized View** – a view that is precomputed into a table. A materialized view always has exactly one batch flow writing to it.
 - **Temporary View** – a view that is scoped to an execution of the pipeline. It can be referenced from flows within the pipeline. It's useful for encapsulating transformations and intermediate logical entities that multiple other elements of the pipeline depend on.
 
+A flow cannot perform a streaming read of a materialized view defined in the same pipeline (for example, `spark.readStream.table("my_mv")` or `SELECT ... FROM STREAM my_mv` in the query of a streaming table), because the materialized view is rewritten on every pipeline update and the stream would re-ingest the whole view each time. Read the materialized view with a batch read instead, or define the upstream dataset as a streaming table.
+
 ### Pipelines
 
 A pipeline is the primary unit of development and execution in SDP. A pipeline can contain one or more flows, streaming tables, and materialized views. While your pipeline runs, it analyzes the dependencies of your defined objects and orchestrates their order of execution and parallelization automatically.
@@ -297,7 +299,7 @@ def batch_mv() -> DataFrame:
 
 ### Querying Tables Defined in a Pipeline in Python
 
-You can reference other tables defined in your pipeline in the same way you'd reference tables defined outside your pipeline:
+You can reference other tables defined in your pipeline in the same way you'd reference tables defined outside your pipeline. Note that a materialized view defined in the pipeline must be read with a batch read (`spark.table` or `spark.read.table`) rather than `spark.readStream.table`, because it is rewritten on every pipeline update:
 
 ```python
 from pyspark import pipelines as dp

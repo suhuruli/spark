@@ -27,6 +27,7 @@ class PipelineEventStreamSuite extends SparkDeclarativePipelinesServerTest {
   test("expected events are streamed back to the client") {
     withRawBlockingStub { implicit stub =>
       val graphId = createDataflowGraph
+      sql("CREATE TABLE spark_catalog.default.src AS SELECT * FROM RANGE(5)")
       val pipeline = new TestPipelineDefinition(graphId) {
         createTable(
           name = "a",
@@ -35,7 +36,7 @@ class PipelineEventStreamSuite extends SparkDeclarativePipelinesServerTest {
         createTable(
           name = "b",
           outputType = proto.OutputType.TABLE,
-          sql = Some("SELECT * FROM STREAM a"))
+          sql = Some("SELECT * FROM STREAM spark_catalog.default.src"))
       }
       registerPipelineOutputs(pipeline)
 
@@ -131,6 +132,7 @@ class PipelineEventStreamSuite extends SparkDeclarativePipelinesServerTest {
   test("successful dry run") {
     withRawBlockingStub { implicit stub =>
       val graphId = createDataflowGraph
+      sql("CREATE TABLE spark_catalog.default.src AS SELECT * FROM RANGE(5)")
       val pipeline = new TestPipelineDefinition(graphId) {
         createTable(
           name = "a",
@@ -139,7 +141,7 @@ class PipelineEventStreamSuite extends SparkDeclarativePipelinesServerTest {
         createTable(
           name = "b",
           outputType = proto.OutputType.TABLE,
-          sql = Some("SELECT * FROM STREAM a"))
+          sql = Some("SELECT * FROM STREAM spark_catalog.default.src"))
       }
       registerPipelineOutputs(pipeline)
 

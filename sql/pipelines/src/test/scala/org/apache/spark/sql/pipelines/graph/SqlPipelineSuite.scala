@@ -306,11 +306,34 @@ class SqlPipelineSuite extends PipelineTest with SharedSparkSession {
     }
   }
 
+  test("Streaming read of a materialized view in the same pipeline fails validation") {
+    val unresolvedDataflowGraph = unresolvedDataflowGraphFromSql(
+      sqlText =
+        """
+          |CREATE MATERIALIZED VIEW mv AS SELECT * FROM RANGE(3);
+          |CREATE STREAMING TABLE st AS SELECT * FROM STREAM mv;
+          |""".stripMargin
+    )
+    val ex = intercept[AnalysisException] {
+      unresolvedDataflowGraph
+        .resolve(spark.sessionState.conf.caseSensitiveAnalysis)
+        .validate(spark.sessionState.conf.caseSensitiveAnalysis)
+    }
+    checkError(
+      exception = ex,
+      condition = "INVALID_FLOW_QUERY_TYPE.STREAMING_READ_OF_MATERIALIZED_VIEW",
+      parameters = Map(
+        "flowIdentifier" -> fullyQualifiedIdentifier("st").quotedString,
+        "tableIdentifier" -> fullyQualifiedIdentifier("mv").quotedString
+      )
+    )
+  }
+
   test("MV/ST with partition columns works") {
     withTable("mv", "st") {
       val unresolvedDataflowGraph = unresolvedDataflowGraphFromSql(
         sqlText =
-          """
+          s"""
             |CREATE MATERIALIZED VIEW mv
             |PARTITIONED BY (id_mod)
             |AS
@@ -322,7 +345,10 @@ class SqlPipelineSuite extends PipelineTest with SharedSparkSession {
             |CREATE STREAMING TABLE st
             |PARTITIONED BY (id_mod)
             |AS
-            |SELECT * FROM STREAM(mv);
+            |SELECT
+            |  id,
+            |  id % 2 AS id_mod
+            |FROM STREAM($externalTable1Ident);
             |""".stripMargin
       )
       startPipelineAndWaitForCompletion(unresolvedDataflowGraph)

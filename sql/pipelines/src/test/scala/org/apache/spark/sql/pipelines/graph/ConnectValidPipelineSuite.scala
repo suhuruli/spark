@@ -71,6 +71,24 @@ class ConnectValidPipelineSuite extends PipelineTest with SharedSparkSession {
     )
   }
 
+  test("Materialized view reading a streaming table with a batch read is valid") {
+    val session = spark
+    import session.implicits._
+
+    class P extends TestGraphRegistrationContext(spark) {
+      registerTable("st", query = Option(dfFlowFunc(MemoryStream[Int].toDF())))
+      registerMaterializedView("mv", query = readFlowFunc("st"))
+    }
+    val p = new P()
+      .resolveToDataflowGraph()
+      .validate(spark.sessionState.conf.caseSensitiveAnalysis)
+    assert(!p.resolvedFlow(fullyQualifiedIdentifier("mv")).df.isStreaming)
+    assert(
+      p.resolvedFlow(fullyQualifiedIdentifier("mv")).inputs == Set(fullyQualifiedIdentifier("st")),
+      "Flow did not have the expected inputs"
+    )
+  }
+
   test("Dependencies") {
     val session = spark
     import session.implicits._
