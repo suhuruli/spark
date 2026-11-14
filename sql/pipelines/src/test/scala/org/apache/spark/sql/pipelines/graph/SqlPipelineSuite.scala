@@ -17,7 +17,6 @@
 package org.apache.spark.sql.pipelines.graph
 
 import org.apache.spark.sql.{AnalysisException, Row}
-import org.apache.spark.sql.catalyst.parser.ParseException
 import org.apache.spark.sql.connector.catalog.{Identifier, SharedTablesInMemoryRowLevelOperationTableCatalog, TableCatalog}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.pipelines.autocdc.{ColumnSelection, ScdType}
@@ -426,7 +425,7 @@ class SqlPipelineSuite extends PipelineTest with SharedSparkSession {
     val graphRegistrationContext = new TestGraphRegistrationContext(spark)
     val sqlGraphRegistrationContext = new SqlGraphRegistrationContext(graphRegistrationContext)
 
-    val ex = intercept[ParseException] {
+    val ex = intercept[SqlFileParseException] {
       sqlGraphRegistrationContext.processSqlFile(
         sqlText = """CREATE STREAMING TABLE a
                     |LOCATION "/path/to/table"
@@ -437,6 +436,30 @@ class SqlPipelineSuite extends PipelineTest with SharedSparkSession {
     }
 
     assert(ex.getMessage.contains("Specifying location is not supported"))
+  }
+
+  test("Parse error in a SQL file names the file") {
+    val graphRegistrationContext = new TestGraphRegistrationContext(spark)
+    val sqlGraphRegistrationContext = new SqlGraphRegistrationContext(graphRegistrationContext)
+
+    val ex = intercept[SqlFileParseException] {
+      sqlGraphRegistrationContext.processSqlFile(
+        sqlText = """
+                    |CREATE MATERIALIZED VIEW a AS SELECT 1;
+                    |
+                    |CREATE MATERIALIZED VIEW b AS SELCT id FROM range(1);
+                    |""".stripMargin,
+        sqlFilePath = "transformations/b.sql",
+        spark = spark
+      )
+    }
+
+    assert(ex.getCondition == "PIPELINE_SQL_FILE_PARSE_ERROR")
+    assert(ex.getMessage.contains("transformations/b.sql"))
+    // The parser's own error is kept, both in the message and as the cause.
+    assert(ex.getMessage.contains("Syntax error at or near 'SELCT'"))
+    assert(ex.parseException.getCondition == "PARSE_SYNTAX_ERROR")
+    assert(ex.getCause eq ex.parseException)
   }
 
   test("Tables living in arbitrary schemas can be read from pipeline") {
@@ -639,7 +662,7 @@ class SqlPipelineSuite extends PipelineTest with SharedSparkSession {
     val graphRegistrationContext = new TestGraphRegistrationContext(spark)
     val sqlGraphRegistrationContext = new SqlGraphRegistrationContext(graphRegistrationContext)
 
-    val ex = intercept[ParseException] {
+    val ex = intercept[SqlFileParseException] {
       sqlGraphRegistrationContext.processSqlFile(
         sqlText = """
                     |CREATE TEMPORARY VIEW some_database.tv AS SELECT 1;
@@ -650,7 +673,7 @@ class SqlPipelineSuite extends PipelineTest with SharedSparkSession {
       )
     }
 
-    assert(ex.errorClass.contains("INVALID_TEMP_OBJ_QUALIFIER"))
+    assert(ex.parseException.errorClass.contains("INVALID_TEMP_OBJ_QUALIFIER"))
   }
 
   test("create view syntax for persisted views") {

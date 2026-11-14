@@ -24,6 +24,7 @@ import org.apache.spark.sql.Column
 import org.apache.spark.sql.catalyst.{QueryPlanningTracker, TableIdentifier}
 import org.apache.spark.sql.catalyst.analysis.{UnresolvedAttribute, UnresolvedRelation}
 import org.apache.spark.sql.catalyst.expressions.Expression
+import org.apache.spark.sql.catalyst.parser.ParseException
 import org.apache.spark.sql.catalyst.plans.logical.{AutoCdcInto, CreateFlowCommand, CreateMaterializedViewAsSelect, CreateStreamingTable, CreateStreamingTableAsSelect, CreateStreamingTableAutoCdc, CreateView, InsertIntoStatement, LogicalPlan, UnresolvedInsert}
 import org.apache.spark.sql.catalyst.util.StringUtils
 import org.apache.spark.sql.classic.ClassicConversions._
@@ -96,6 +97,25 @@ object SqlGraphElementRegistrationException {
     case None => ""
   }
 }
+
+/**
+ * Thrown when a SQL statement in a pipeline SQL file cannot be parsed.
+ *
+ * A pipeline can be made up of many SQL files, and the parser only knows about the text of the
+ * statement it was given. This exception keeps the parser's error (as the cause, and repeated in
+ * the message) and adds the path of the file the statement was read from, so that the failing
+ * file can be identified from the error message alone.
+ */
+case class SqlFileParseException(
+    sqlFilePath: String,
+    parseException: ParseException) extends AnalysisException(
+  errorClass = "PIPELINE_SQL_FILE_PARSE_ERROR",
+  messageParameters = Map(
+    "filePath" -> sqlFilePath,
+    "message" -> parseException.getMessage
+  ),
+  cause = Option(parseException)
+)
 
 /**
  * SQL statement processor context. At any instant, an instance of this class holds the "active"
@@ -902,7 +922,13 @@ object SqlGraphRegistrationContext {
     val rawSqlStatements = splitSqlTextBySemicolon(sqlFileText)
     rawSqlStatements.map { rawSqlStatement =>
       val rawSqlStatementText = rawSqlStatement
-      val logicalPlanFromSqlQuery = spark.sessionState.sqlParser.parsePlan(rawSqlStatementText)
+      val logicalPlanFromSqlQuery = try {
+        spark.sessionState.sqlParser.parsePlan(rawSqlStatementText)
+      } catch {
+        // The parser does not know which file the statement came from, so attach the file path
+        // here before the error reaches the user.
+        case e: ParseException => throw SqlFileParseException(sqlFilePath, e)
+      }
 
       // Update and return the query origin, accounting for the position of the statement with
       // respect to the entire file.

@@ -7303,6 +7303,13 @@
     ],
     "sqlState" : "42K0S"
   },
+  "PIPELINE_SQL_FILE_PARSE_ERROR" : {
+    "message" : [
+      "Failed to parse a SQL statement in file '<filePath>'.",
+      "<message>"
+    ],
+    "sqlState" : "42000"
+  },
   "PIPELINE_SQL_GRAPH_ELEMENT_REGISTRATION_ERROR" : {
     "message" : [
       "<message>",
