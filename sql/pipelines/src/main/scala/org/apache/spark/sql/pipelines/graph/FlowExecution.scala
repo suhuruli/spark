@@ -20,7 +20,7 @@ package org.apache.spark.sql.pipelines.graph
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.atomic.AtomicBoolean
 
-import scala.concurrent.{ExecutionContext, Future}
+import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.util.control.NonFatal
 
 import org.apache.spark.internal.{Logging, LogKeys}
@@ -127,6 +127,25 @@ trait FlowExecution {
   def exception: Option[Throwable] = _future.flatMap(_.value).flatMap(_.failed.toOption)
 
   /**
+   * Runs `body` on the `FlowExecution` thread pool and returns a future that completes when it
+   * returns or throws. Unlike `Future.apply`, the returned future also fails for fatal throwables
+   * such as `LinkageError`. `Future.apply` lets those escape to the pool thread without ever
+   * completing the future, so the graph execution would wait on the flow forever.
+   */
+  protected final def executeOnThreadPool(body: => Unit): Future[Unit] = {
+    val promise = Promise[Unit]()
+    executionContext.execute { () =>
+      try {
+        body
+        promise.success(())
+      } catch {
+        case t: Throwable => promise.failure(t)
+      }
+    }
+    promise.future
+  }
+
+  /**
    * Executes this FlowExecution synchronously to perform its intended update.
    * This method should be overridden by subclasses to provide the actual execution logic.
    *
@@ -217,7 +236,7 @@ trait StreamingFlowExecution extends FlowExecution with Logging {
     )
     val streamingQuery = SparkSessionUtils.withSqlConf(spark, sqlConf.toList: _*)(startStream())
     _streamingQuery = Option(streamingQuery)
-    Future(streamingQuery.awaitTermination())
+    executeOnThreadPool(streamingQuery.awaitTermination())
   }
 }
 
@@ -265,7 +284,7 @@ class BatchTableWrite(
     SparkSessionUtils.withSqlConf(spark, sqlConf.toList: _*) {
       updateContext.flowProgressEventLogger.recordRunning(flow = flow)
       val data = graph.reanalyzeFlow(flow, sessionCaseSensitive).df
-      Future {
+      executeOnThreadPool {
         val dataFrameWriter = data.write
         destination.format.foreach(dataFrameWriter.format)
 

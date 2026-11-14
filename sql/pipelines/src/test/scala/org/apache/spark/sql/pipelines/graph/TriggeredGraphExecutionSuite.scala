@@ -17,8 +17,11 @@
 
 package org.apache.spark.sql.pipelines.graph
 
+import org.scalatest.concurrent.{Signaler, ThreadSignaler}
 import org.scalatest.time.{Seconds, Span}
 
+import org.apache.spark.{Partition, SparkContext, TaskContext}
+import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{functions, Row}
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.classic.{DataFrame, Dataset}
@@ -32,6 +35,9 @@ import org.apache.spark.sql.test.SharedSparkSession
 import org.apache.spark.sql.types.{IntegerType, StringType, StructType}
 
 class TriggeredGraphExecutionSuite extends ExecutionTest with SharedSparkSession {
+
+  // Interrupt the test thread on `failAfter` timeouts so a hung run fails instead of blocking.
+  implicit private val signaler: Signaler = ThreadSignaler
 
   /** Returns a Dataset of Longs from the table with the given identifier. */
   private def getTable(identifier: TableIdentifier): Dataset[Long] = {
@@ -1074,6 +1080,72 @@ class TriggeredGraphExecutionSuite extends ExecutionTest with SharedSparkSession
     assert(warnCount == 2 && errorCount == 1)
   }
 
+  test("fatal error in a batch flow fails the flow and the run instead of hanging") {
+    val session = spark
+    import session.implicits._
+
+    val pipelineDef = new TestGraphRegistrationContext(spark) {
+      registerMaterializedView("a", query = dfFlowFunc(Seq(1, 2).toDF("x")))
+      registerMaterializedView(
+        "b",
+        query = dfFlowFunc(
+          spark.createDataFrame(
+            new FatalErrorRDD(spark.sparkContext),
+            new StructType().add("x", IntegerType)
+          )
+        )
+      )
+      registerMaterializedView("c", query = readFlowFunc("b"))
+    }
+    val graph = pipelineDef.toDataflowGraph
+    val updateContext = TestPipelineUpdateContext(spark, graph, storageRoot)
+    // A fatal error used to escape the flow's future without completing it, so the run never
+    // noticed the flow had died. Bound the wait so a regression fails instead of hanging.
+    failAfter(Span(120, Seconds)) {
+      updateContext.pipelineExecution.runPipeline()
+    }
+
+    val graphExecution = updateContext.pipelineExecution.graphExecution.get
+    assert(
+      getFlowsWithState(graphExecution, StreamState.SUCCESSFUL) == Set(
+        fullyQualifiedIdentifier("a")
+      )
+    )
+    assert(
+      getFlowsWithState(graphExecution, StreamState.TERMINATED_WITH_ERROR) == Set(
+        fullyQualifiedIdentifier("b")
+      )
+    )
+    assert(
+      getFlowsWithState(graphExecution, StreamState.SKIPPED) == Set(fullyQualifiedIdentifier("c"))
+    )
+
+    // `b` is retried the default 2 times and then fails for good. Scala's `Promise` boxes an
+    // `Error` in an `ExecutionException`, so the original error is reported as the cause.
+    assertFlowProgressEvent(
+      eventBuffer = updateContext.eventBuffer,
+      identifier = fullyQualifiedIdentifier("b"),
+      expectedFlowStatus = FlowStatus.FAILED,
+      expectedEventLevel = EventLevel.ERROR,
+      errorChecker = _.getCause.isInstanceOf[NoSuchMethodError],
+      expectedNumOfEvents = Option(3)
+    )
+    assertFlowProgressEvent(
+      eventBuffer = updateContext.eventBuffer,
+      identifier = fullyQualifiedIdentifier("c"),
+      expectedFlowStatus = FlowStatus.SKIPPED,
+      expectedEventLevel = EventLevel.INFO
+    )
+    assertRunProgressEvent(
+      eventBuffer = updateContext.eventBuffer,
+      state = RunState.FAILED,
+      expectedEventLevel = EventLevel.ERROR,
+      msgChecker = _.contains(
+        "Run is FAILED since flow 'spark_catalog.test_db.b' has failed more than 2 times"
+      )
+    )
+  }
+
   /** A non-retryable (retries exhausted) failure, i.e. one that stops the run. */
   private def stopFailure(ts: Long, flowName: String, cause: Throwable): TriggeredFailureInfo = {
     // currentNumTries > maxAllowedRetries yields a StopFlowExecution.
@@ -1122,4 +1194,18 @@ class TriggeredGraphExecutionSuite extends ExecutionTest with SharedSparkSession
   test("chooseRunTerminationReason has no reason when no flow stopped the run") {
     assert(TriggeredGraphExecution.chooseRunTerminationReason(Iterator.empty).isEmpty)
   }
+}
+
+/**
+ * An RDD whose driver-side partition planning throws a `LinkageError`, like a binary-incompatible
+ * connector jar does. `LinkageError` is fatal to Scala's `Future`, so a flow reading from this RDD
+ * exercises the error path that used to hang the run.
+ */
+private class FatalErrorRDD(sc: SparkContext) extends RDD[Row](sc, Nil) {
+  override def getPartitions: Array[Partition] = {
+    // scalastyle:off throwerror
+    throw new NoSuchMethodError("Simulated binary incompatibility while planning the flow")
+    // scalastyle:on throwerror
+  }
+  override def compute(split: Partition, context: TaskContext): Iterator[Row] = Iterator.empty
 }
