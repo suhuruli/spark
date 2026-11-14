@@ -999,6 +999,13 @@
     ],
     "sqlState" : "42000"
   },
+  "CANNOT_UPDATE_TABLE_FORMAT" : {
+    "message" : [
+      "Declared format <requestedFormat> for table <tableName> conflicts with the existing table format <existingFormat>.",
+      "The format of an existing table cannot be changed. Please drop the table or change the declared format to match the existing table."
+    ],
+    "sqlState" : "42000"
+  },
   "CANNOT_UP_CAST_DATATYPE" : {
     "message" : [
       "Cannot up cast <expression> from <sourceType> to <targetType>.",

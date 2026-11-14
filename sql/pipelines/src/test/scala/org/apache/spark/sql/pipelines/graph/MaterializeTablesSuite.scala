@@ -22,6 +22,7 @@ import scala.jdk.CollectionConverters._
 
 import org.apache.spark.SparkThrowable
 import org.apache.spark.sql.{AnalysisException, Row, SQLContext}
+import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.connector.catalog.{
   CatalogV2Util,
   Identifier,
@@ -1123,7 +1124,8 @@ abstract class MaterializeTablesSuite extends BaseCoreExecutionTest {
   private def materializeStreamingTable(
       name: String,
       schema: StructType,
-      properties: Map[String, String]): Unit = {
+      properties: Map[String, String],
+      format: Option[String] = None): Unit = {
     // All nulls dummy row, compatible with any schema type
     val row = Row.fromSeq(Seq.fill(schema.length)(null))
     val df = spark.createDataFrame(spark.sparkContext.parallelize(Seq(row)), schema)
@@ -1134,6 +1136,7 @@ abstract class MaterializeTablesSuite extends BaseCoreExecutionTest {
           query = Option(dfFlowFunc(df)),
           specifiedSchema = Option(schema),
           properties = properties,
+          format = format,
           catalog = Option(recordingCatalogName),
           database = Option(recordingNamespace)
         )
@@ -1188,6 +1191,125 @@ abstract class MaterializeTablesSuite extends BaseCoreExecutionTest {
       assert(table.properties().get("p.a") == "2")
       assert(table.properties().get("p.new") == "n")
     }
+  }
+
+  test("re-materializing with the same format never re-sets the reserved provider property") {
+    withRecordingCatalog {
+      val schema = new StructType().add("id", IntegerType)
+      materializeStreamingTable("t", schema, Map.empty, format = Option("parquet"))
+      assert(recordingCatalog.recordedAlters.isEmpty)
+      assert(
+        loadTableFromRecordingCatalog("t").properties().get(TableCatalog.PROP_PROVIDER) == "parquet"
+      )
+
+      // Same declared format: nothing to alter.
+      materializeStreamingTable("t", schema, Map.empty, format = Option("parquet"))
+      assert(recordingCatalog.recordedAlters.isEmpty)
+
+      // Data source names are case-insensitive, so this is the same format too. The reserved
+      // `provider` property of an existing table cannot be altered, so no alter may be issued.
+      materializeStreamingTable("t", schema, Map.empty, format = Option("PARQUET"))
+      assert(recordingCatalog.recordedAlters.isEmpty)
+
+      // Other property changes are still applied, without touching the provider.
+      materializeStreamingTable("t", schema, Map("p.a" -> "1"), format = Option("PARQUET"))
+      assert(recordingCatalog.recordedAlters.size == 1)
+      val set = recordingCatalog.recordedAlters.flatten.collect {
+        case s: TableChange.SetProperty => s.property() -> s.value()
+      }.toMap
+      assert(set == Map("p.a" -> "1"))
+      assert(
+        loadTableFromRecordingCatalog("t").properties().get(TableCatalog.PROP_PROVIDER) == "parquet"
+      )
+    }
+  }
+
+  test("re-materializing with a conflicting format fails before the table is altered") {
+    withRecordingCatalog {
+      val schema = new StructType().add("id", IntegerType)
+      materializeStreamingTable("t", schema, Map.empty, format = Option("parquet"))
+
+      val ex = intercept[TableMaterializationException] {
+        materializeStreamingTable(
+          "t",
+          schema.add("value", StringType),
+          Map("p.a" -> "1"),
+          format = Option("json")
+        )
+      }
+      checkError(
+        exception = ex.cause.asInstanceOf[AnalysisException],
+        condition = "CANNOT_UPDATE_TABLE_FORMAT",
+        parameters = Map(
+          "tableName" ->
+            TableIdentifier("t", Some(recordingNamespace), Some(recordingCatalogName)).quotedString,
+          "existingFormat" -> "parquet",
+          "requestedFormat" -> "json"
+        )
+      )
+      // The conflict is detected up front: neither the schema nor the properties were altered.
+      assert(recordingCatalog.recordedAlters.isEmpty)
+      val table = loadTableFromRecordingCatalog("t")
+      assert(table.properties().get(TableCatalog.PROP_PROVIDER) == "parquet")
+      assert(table.columns().length == 1)
+      assert(!table.properties().containsKey("p.a"))
+    }
+  }
+
+  test("re-materializing a materialized view with a conflicting format fails before truncation") {
+    withRecordingCatalog {
+      def materializeMaterializedView(format: Option[String]): Unit = {
+        materializeGraph(
+          new TestGraphRegistrationContext(spark) {
+            registerMaterializedView(
+              "mv",
+              query = dfFlowFunc(Seq(1, 2, 3).toDF("id")),
+              format = format,
+              catalog = Option(recordingCatalogName),
+              database = Option(recordingNamespace)
+            )
+          }.resolveToDataflowGraph(),
+          storageRoot = storageRoot
+        )
+      }
+      val tableName = s"$recordingCatalogName.$recordingNamespace.mv"
+      materializeMaterializedView(format = Option("parquet"))
+      spark.sql(s"INSERT INTO $tableName VALUES (1), (2), (3)")
+      assert(spark.table(tableName).count() == 3)
+
+      val ex = intercept[TableMaterializationException] {
+        materializeMaterializedView(format = Option("json"))
+      }
+      assert(ex.cause.asInstanceOf[SparkThrowable].getCondition == "CANNOT_UPDATE_TABLE_FORMAT")
+      // A materialized view is normally truncated before being recomputed; a format conflict is
+      // detected before that, so the existing data is untouched and nothing was altered.
+      assert(spark.table(tableName).count() == 3)
+      assert(recordingCatalog.recordedAlters.isEmpty)
+    }
+  }
+
+  test("re-materializing a session catalog table with the same format in a different case") {
+    val identifier = TableIdentifier("t_fmt", Some(TestGraphRegistrationContext.DEFAULT_DATABASE))
+    def materialize(format: String): Unit = {
+      materializeGraph(
+        new TestGraphRegistrationContext(spark) {
+          registerTable(
+            "t_fmt",
+            query = Option(dfFlowFunc(spark.readStream.format("rate").load())),
+            format = Option(format)
+          )
+        }.resolveToDataflowGraph(),
+        storageRoot = storageRoot
+      )
+    }
+    materialize("parquet")
+    materialize("PARQUET")
+    val catalogTable = spark.sessionState.catalog.getTableMetadata(identifier)
+    assert(catalogTable.provider.contains("parquet"))
+    // The second run did not re-set the reserved `provider` property. The session catalog stores a
+    // `setProperty` for it as an ordinary table property without changing the actual format, so a
+    // re-set would have been recorded here as the differently-cased value.
+    assert(catalogTable.properties.get(TableCatalog.PROP_PROVIDER).forall(_ == "parquet"))
   }
 
   test("re-materializing with an added column issues an alterTable") {

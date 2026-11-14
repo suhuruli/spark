@@ -352,6 +352,13 @@ object DatasetManager extends Logging {
       }
     }
 
+    // Error if the declared format doesn't match the existing table's. Like its partitioning, the
+    // format of an existing table cannot be changed in place, so this is checked up front, before
+    // any data is wiped or the table is altered below.
+    existingTableOpt.foreach { existingTable =>
+      validateDeclaredFormat(table.identifier, table.format, existingTable)
+    }
+
     // A streaming table on a non-full-refresh run is maintained incrementally: its existing data is
     // preserved and its schema is merged with (not replaced by) the schema computed in this run.
     // Every other case (materialized views, and any full refresh) is recomputed from scratch:
@@ -524,6 +531,11 @@ object DatasetManager extends Logging {
           // schema is evolved, not here -- see `validateNoAutoCdcAuxConfigDrift`. Validating here
           // would be too late: the target has already been ALTERed by the time an aux-owned check
           // could reject the run.
+          validateDeclaredFormat(
+            auxiliaryTableSpec.identifier,
+            auxiliaryTableSpec.properties.get(TableCatalog.PROP_PROVIDER),
+            existingAuxTable
+          )
           evolveTable(
             catalog = catalog,
             tableIdentifier = auxiliaryTableIdentifier,
@@ -620,6 +632,36 @@ object DatasetManager extends Logging {
   }
 
   /**
+   * Validates that `declaredFormat`, the format declared for the table in the pipeline definition
+   * (if any), matches the format of the already existing `existingTable`, as reported through its
+   * reserved `provider` property. Data source names are case-insensitive, so the comparison is too,
+   * and nothing is checked when either side is unknown.
+   *
+   * The format of an existing table cannot be changed in place, so a conflict is surfaced as a
+   * clear error before the table is truncated or altered, rather than as a catalog-specific failure
+   * (or a silently ignored property change) from re-setting the `provider` property.
+   */
+  private def validateDeclaredFormat(
+      tableIdentifier: TableIdentifier,
+      declaredFormat: Option[String],
+      existingTable: V2Table): Unit = {
+    declaredFormat.foreach { requestedFormat =>
+      Option(existingTable.properties().get(TableCatalog.PROP_PROVIDER)).foreach { existingFormat =>
+        if (!requestedFormat.equalsIgnoreCase(existingFormat)) {
+          throw new AnalysisException(
+            errorClass = "CANNOT_UPDATE_TABLE_FORMAT",
+            messageParameters = Map(
+              "tableName" -> tableIdentifier.quotedString,
+              "existingFormat" -> existingFormat,
+              "requestedFormat" -> requestedFormat
+            )
+          )
+        }
+      }
+    }
+  }
+
+  /**
    * Creates the table at `identifier` with the given schema, properties, and partition/cluster
    * transforms. Used both for graph datasets and for internal auxiliary tables when no table yet
    * exists at the identifier.
@@ -658,7 +700,8 @@ object DatasetManager extends Logging {
    *                                schema due to schema evolution across runs.
    * @param properties              the declared table properties to (re)set on the table. Note
    *                                that properties absent here are NOT removed from the table (see
-   *                                the TODO in the body).
+   *                                the TODO in the body), and that the reserved `provider`
+   *                                property (the table format) is never re-set (see the body).
    * @param mergeWithExistingSchema whether the effective schema is the merge of the existing and
    *                                desired schemas (additive evolution) rather than the desired
    *                                schema as-is.
@@ -700,8 +743,16 @@ object DatasetManager extends Logging {
     // a user-declared property the user dropped from a catalog/engine-managed property (e.g. the
     // non-reserved `clusteringColumns`, or arbitrary catalog-internal keys) that must never be
     // removed, and there is no record of which keys the pipeline previously set.
+    //
+    // The reserved `provider` property (the table format) is never re-set on an existing table: a
+    // table's format cannot be changed in place. Spark SQL rejects it in
+    // `ALTER TABLE ... SET TBLPROPERTIES`, and DSv2 catalogs either reject such a change outright
+    // or store it as an ordinary property without changing the format. Callers validate up front
+    // that the declared format matches the existing table (see `validateDeclaredFormat`), so the
+    // values can only differ here in a way the catalog treats as equivalent (e.g. by case).
     val propertiesToSet = properties.collect {
-      case (k, v) if !Option(existingProperties.get(k)).contains(v) =>
+      case (k, v)
+          if k != TableCatalog.PROP_PROVIDER && !Option(existingProperties.get(k)).contains(v) =>
         TableChange.setProperty(k, v)
     }
 
