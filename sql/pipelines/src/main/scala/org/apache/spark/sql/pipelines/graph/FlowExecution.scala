@@ -23,11 +23,12 @@ import java.util.concurrent.atomic.AtomicBoolean
 import scala.concurrent.{ExecutionContext, Future}
 import scala.util.control.NonFatal
 
+import org.apache.spark.SparkException
 import org.apache.spark.internal.{Logging, LogKeys}
 import org.apache.spark.sql.{Dataset, Row}
 import org.apache.spark.sql.catalyst.TableIdentifier
+import org.apache.spark.sql.classic.{DataFrame, SparkSession}
 import org.apache.spark.sql.classic.ClassicConversions._
-import org.apache.spark.sql.classic.SparkSession
 import org.apache.spark.sql.pipelines.autocdc.{
   Scd1BatchProcessor,
   Scd1ForeachBatchHandler,
@@ -315,6 +316,36 @@ class SinkWrite(
 }
 
 /**
+ * A [[StreamingFlowExecution]] that applies a CDC event stream to a target [[Table]] via MERGE,
+ * in accordance with the configured [[AutoCdcMergeFlow.changeArgs]].
+ */
+trait AutoCdcMergeStreamingWrite extends StreamingFlowExecution {
+
+  /** The [[AutoCdcMergeFlow]] that this execution is applying. */
+  def flow: AutoCdcMergeFlow
+
+  def graph: DataflowGraph
+
+  override def getOrigin: QueryOrigin = flow.origin
+
+  /**
+   * The CDC events to apply, read from the flow re-analyzed against the current graph. The
+   * re-analysis picks up the current state of the flow's sources; the flow then decides which of
+   * its rows are CDC events (see [[AutoCdcMergeFlow.changeDataFeed]]).
+   */
+  protected def reanalyzedChangeDataFeed: DataFrame = {
+    graph.reanalyzeFlow(flow, sessionCaseSensitive) match {
+      case reanalyzedFlow: AutoCdcMergeFlow => reanalyzedFlow.changeDataFeed
+      case other =>
+        throw SparkException.internalError(
+          s"Re-analyzing AutoCDC flow ${flow.displayName} produced a " +
+          s"${other.getClass.getSimpleName} instead of an AutoCdcMergeFlow."
+        )
+    }
+  }
+}
+
+/**
  * A [[StreamingFlowExecution]] that applies a CDC event stream to a target [[Table]] via
  * SCD Type 1 MERGE semantics.
  */
@@ -327,12 +358,10 @@ class Scd1MergeStreamingWrite(
     val trigger: Trigger,
     val destination: Table,
     val sqlConf: Map[String, String]
-) extends StreamingFlowExecution {
-
-  override def getOrigin: QueryOrigin = flow.origin
+) extends AutoCdcMergeStreamingWrite {
 
   override def startStream(): StreamingQuery = {
-    val sourceChangeDataFeed = graph.reanalyzeFlow(flow, sessionCaseSensitive).df
+    val sourceChangeDataFeed = reanalyzedChangeDataFeed
 
     // The auxiliary table is created and evolved during dataset materialization (see
     // [[DatasetManager]]), so it already exists by the time this flow executes; resolve its
@@ -372,12 +401,10 @@ class Scd2MergeStreamingWrite(
     val trigger: Trigger,
     val destination: Table,
     val sqlConf: Map[String, String]
-) extends StreamingFlowExecution {
-
-  override def getOrigin: QueryOrigin = flow.origin
+) extends AutoCdcMergeStreamingWrite {
 
   override def startStream(): StreamingQuery = {
-    val sourceChangeDataFeed = graph.reanalyzeFlow(flow, sessionCaseSensitive).df
+    val sourceChangeDataFeed = reanalyzedChangeDataFeed
 
     // The auxiliary table is created and evolved during dataset materialization (see
     // [[DatasetManager]]), so it already exists by the time this flow executes; resolve its

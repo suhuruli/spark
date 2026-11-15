@@ -258,6 +258,29 @@
     ],
     "sqlState" : "42613"
   },
+  "AUTOCDC_CHANGELOG_SOURCE_NOT_RECONCILABLE" : {
+    "message" : [
+      "AutoCDC flow on table <tableName> reads the changelog <changelogName>, but the read is not configured so that AutoCDC can reconcile its changes deterministically."
+    ],
+    "subClass" : {
+      "CARRYOVER_REMOVAL_DISABLED" : {
+        "message" : [
+          "The changelog may emit copy-on-write carry-over rows (`containsCarryoverRows()` returns true), but the read uses `deduplicationMode` `none`, which keeps them. A carry-over emits an identical `insert` and `delete` for an unchanged row at the same `_commit_version`, and AutoCDC cannot tell that `delete` apart from a real one. Read the changelog with `deduplicationMode` set to `dropCarryovers` (the default) or `netChanges`."
+        ]
+      },
+      "COMPUTE_UPDATES_DISABLED" : {
+        "message" : [
+          "The changelog represents an update as a `delete` and an `insert` row (`representsUpdateAsDeleteAndInsert()` returns true), but the read does not enable `computeUpdates`. Both rows share the same `_commit_version`, so AutoCDC cannot order them. Read the changelog with the `computeUpdates` option set to `true` so that an update arrives as an `update_preimage` and an `update_postimage` row."
+        ]
+      },
+      "SEQUENCING_NOT_BY_COMMIT_VERSION" : {
+        "message" : [
+          "The sequencing expression <sequencingExpression> does not reference `_commit_version`. The `Changelog` contract only guarantees that `_commit_version` orders changes in commit order; any other column, including `_commit_timestamp`, may tie or misorder two changes to the same key. Sequence the flow by `_commit_version`."
+        ]
+      }
+    },
+    "sqlState" : "22023"
+  },
   "AUTOCDC_COLUMNS_NOT_FOUND_IN_SCHEMA" : {
     "message" : [
       "Using <caseSensitivity> column name comparison, the following columns are not present in the <schemaName> schema: <missingColumns>. Available columns: <availableColumns>."

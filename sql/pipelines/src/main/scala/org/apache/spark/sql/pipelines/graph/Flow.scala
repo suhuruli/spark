@@ -29,6 +29,7 @@ import org.apache.spark.sql.pipelines.autocdc.{
   AutoCdcReservedNames,
   CaseSensitivityLabels,
   ChangeArgs,
+  ChangelogSource,
   ColumnSelection,
   Scd1BatchProcessor,
   Scd2BatchProcessor,
@@ -261,12 +262,47 @@ class AutoCdcMergeFlow(
       flows = Seq(this),
       sessionCaseSensitive = sessionCaseSensitive))
 
+  /**
+   * The changelog read feeding this flow, when its source is one (see [[ChangelogSource.detect]]).
+   * Such a source is validated against the changelog contract at construction, so that a read
+   * AutoCDC cannot reconcile deterministically fails here rather than once the flow runs.
+   */
+  private[pipelines] val changelogSource: Option[ChangelogSource] =
+    ChangelogSource.detect(df, effectiveResolver)
+
+  changelogSource.foreach(
+    _.validate(
+      sequencing = flow.changeArgs.sequencing,
+      changeDataFeed = df,
+      destinationIdentifier = destinationIdentifier,
+      resolver = effectiveResolver))
+
+  /**
+   * The CDC configuration this flow runs with. For a changelog source this is the declared
+   * [[AutoCdcFlow.changeArgs]] completed from the changelog contract (delete detection and
+   * metadata-column exclusion, see [[ChangelogSource.completeChangeArgs]]); otherwise it is the
+   * declared configuration as is.
+   */
+  val changeArgs: ChangeArgs = changelogSource match {
+    case Some(source) => source.completeChangeArgs(flow.changeArgs, effectiveResolver)
+    case None => flow.changeArgs
+  }
+
   requireReservedPrefixAbsentInSourceColumns()
   requireReservedFrameworkColumnsAbsentInSourceColumns()
   requireKeysAbsentInIgnoreNullSelection()
   requireReservedPrefixAbsentInIgnoreNullSelection()
 
-  def changeArgs: ChangeArgs = flow.changeArgs
+  /**
+   * The CDC events this flow applies to its target: [[df]] without the rows the changelog contract
+   * says must not be applied (`update_preimage` rows, see
+   * [[ChangelogSource.withoutUpdatePreimages]]). Equal to [[df]] for a non-changelog source, and
+   * always of the same schema as [[df]].
+   */
+  def changeDataFeed: DataFrame = changelogSource match {
+    case Some(source) => source.withoutUpdatePreimages(df)
+    case None => df
+  }
 
   /** The user-selected projection of [[df.schema]] (i.e. before the SCD metadata column). */
   private val userSelectedSchema: StructType = {
