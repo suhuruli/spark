@@ -462,6 +462,35 @@ CREATE TEMPORARY VIEW basic_tv
 AS SELECT * FROM samples.nyctaxi.trips;
 ```
 
+### Choosing the SQL Form for a Dataset
+
+A pipeline SQL file accepts one `CREATE` form for each kind of dataset:
+
+| Dataset | SQL form | Defining query |
+|---------|----------|----------------|
+| Materialized view | `CREATE MATERIALIZED VIEW name AS SELECT ...` | Batch |
+| Streaming table | `CREATE STREAMING TABLE name AS SELECT ... FROM STREAM ...` | Streaming |
+| Temporary view | `CREATE TEMPORARY VIEW name AS SELECT ...` | Batch or streaming |
+| Persisted view | `CREATE VIEW name AS SELECT ...` | Batch |
+
+Use a materialized view for a result that is recomputed in full on every run, and a streaming table for a result that is built up incrementally from a streaming source. The `STREAM` keyword in the query is what makes the query streaming. Without it, a streaming table definition fails with `INVALID_FLOW_QUERY_TYPE.BATCH_RELATION_FOR_STREAMING_TABLE`. Plain `CREATE TABLE` is not accepted in a pipeline SQL file.
+
+A view is not a stored dataset and is not refreshed. Its query is inlined into every flow that reads it, so there is nothing for a run to recompute. A temporary view is visible only inside the pipeline run. `CREATE VIEW` additionally registers the view definition in the catalog on every run, so the view can be queried outside the pipeline; it must be defined by a batch query and cannot read a temporary view.
+
+`CREATE OR REFRESH` is not a view form. `CREATE OR REFRESH VIEW` fails with `PARSE_SYNTAX_ERROR` at `REFRESH`, and so does `CREATE OR REFRESH` in front of `MATERIALIZED VIEW` or `STREAMING TABLE`. A pipeline run refreshes every materialized view and streaming table it defines, so the definition carries no refresh keyword. `CREATE OR REPLACE VIEW` and `CREATE OR REPLACE TEMPORARY VIEW` are accepted and behave the same as the forms without `OR REPLACE`; `OR REPLACE` is not accepted in front of `MATERIALIZED VIEW` or `STREAMING TABLE`.
+
+A streaming read needs a streaming source. `STREAM(name)` reads a streaming table, a table outside the pipeline, or a temporary view whose own query uses `STREAM`. A temporary view with a streaming query must be read with `STREAM(...)`, and one with a batch query must be read without it; a mismatch fails with `INCOMPATIBLE_STREAMING_VIEW_READ` or `INCOMPATIBLE_BATCH_VIEW_READ`. This is how to place a transformation between a streaming source and a streaming table:
+
+```sql
+CREATE TEMPORARY VIEW filtered_events AS
+SELECT * FROM STREAM source_events WHERE event_type IS NOT NULL;
+
+CREATE STREAMING TABLE event_archive AS
+SELECT * FROM STREAM(filtered_events);
+```
+
+A materialized view is not a streaming source, even though `STREAM(name)` on a materialized view defined in the pipeline is accepted without an error. A materialized view is truncated and rewritten on every run, so the streaming read does not see a stream of changes. With the default `parquet` table format, each run's rewrite appears as new files, and the streaming table receives the entire content of the materialized view again on every run: it holds one copy after the first run, two after the second, and so on. To stream through an intermediate step, define that step as a temporary view over a `STREAM` read, as above, or as a streaming table.
+
 ### Creating a Streaming Table in SQL
 
 When creating a streaming table, use the `STREAM` keyword to indicate streaming semantics for the source:
