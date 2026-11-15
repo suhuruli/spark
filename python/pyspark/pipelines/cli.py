@@ -31,9 +31,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generator, List, Mapping, Optional, Sequence
 
-import yaml
+from pyspark.errors import PySparkException, PySparkImportError, PySparkTypeError
 
-from pyspark.errors import PySparkException, PySparkTypeError
+try:
+    import yaml
+except ImportError as error:
+    # PyYAML is an optional dependency of PySpark that only the spark-pipelines command needs,
+    # so a plain `pip install pyspark` does not bring it in. Replace the bare ModuleNotFoundError
+    # with a message that names the extra which does.
+    raise PySparkImportError(
+        errorClass="PIPELINE_PACKAGE_NOT_INSTALLED",
+        messageParameters={"package_name": "PyYAML", "module_name": "yaml"},
+    ) from error
+
 from pyspark.pipelines.add_pipeline_analysis_context import add_pipeline_analysis_context
 from pyspark.pipelines.block_session_mutations import block_session_mutations
 from pyspark.pipelines.graph_element_registry import (

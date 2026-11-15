@@ -15,6 +15,8 @@
 # limitations under the License.
 #
 
+import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -525,6 +527,27 @@ class CLIUtilityTests(ReusedConnectTestCase):
                 context.exception.getMessageParameters(),
                 {"glob_pattern": "transformations/**/*.py"},
             )
+
+
+class CLIMissingDependencyTests(unittest.TestCase):
+    def test_missing_yaml_points_to_pipelines_extra(self):
+        # The import has to fail, so run it in a fresh interpreter instead of unloading modules
+        # from this one. A None entry in sys.modules makes `import yaml` raise
+        # ModuleNotFoundError, exactly as it does when PyYAML is not installed.
+        program = textwrap.dedent(
+            """
+            import sys
+
+            sys.modules["yaml"] = None
+            import pyspark.pipelines.cli
+            """
+        )
+        proc = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("PySparkImportError", proc.stderr)
+        self.assertIn("[PIPELINE_PACKAGE_NOT_INSTALLED]", proc.stderr)
+        self.assertIn("PyYAML", proc.stderr)
+        self.assertIn('pip install "pyspark[pipelines]"', proc.stderr)
 
 
 if __name__ == "__main__":
