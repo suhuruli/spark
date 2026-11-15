@@ -137,24 +137,29 @@ class LocalConnectServerReuseTests(unittest.TestCase):
     def test_startup_seed_conf(self) -> None:
         from unittest import mock
 
+        # spark-submit hands its confs over in groups of ten (see PythonRunner); the seed must
+        # include every group, not only the last one.
         initial = {
             "spark.sql.shuffle.partitions": "8",
             "spark.master": "local[1]",
         }
+        initial_second_group = {"spark.jars": "/tmp/a.jar"}
         opts = {
             "spark.sql.warehouse.dir": os.path.join(self._tmpdir, "warehouse"),
             "spark.local.connect.reuse": "true",
             "spark.connect.grpc.binding.port": "0",
         }
         env = {
-            "PYSPARK_REMOTE_INIT_CONF_LEN": "1",
+            "PYSPARK_REMOTE_INIT_CONF_LEN": "2",
             "PYSPARK_REMOTE_INIT_CONF_0": json.dumps(initial),
+            "PYSPARK_REMOTE_INIT_CONF_1": json.dumps(initial_second_group),
         }
         with mock.patch.dict(os.environ, env):
             self.assertEqual(
                 local_server.startup_seed_conf(opts),
                 {
                     "spark.sql.shuffle.partitions": "8",
+                    "spark.jars": "/tmp/a.jar",
                     "spark.sql.warehouse.dir": opts["spark.sql.warehouse.dir"],
                 },
             )

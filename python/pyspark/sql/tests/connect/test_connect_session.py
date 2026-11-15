@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 
+import json
 import os
 import unittest
 import uuid
@@ -398,6 +399,32 @@ class SparkConnectSessionBuilderTests(unittest.TestCase):
 
         self.assertIsNot(s1, s3)
 
+    def test_apply_options_merges_all_init_conf_groups(self):
+        from unittest import mock
+
+        # spark-submit hands its confs to the Python process in groups of ten (see
+        # PythonRunner); the session must see the keys from every group, not only the last.
+        env = {
+            "PYSPARK_REMOTE_INIT_CONF_LEN": "2",
+            "PYSPARK_REMOTE_INIT_CONF_0": json.dumps(
+                {"spark.sql.shuffle.partitions": "7", "spark.jars": "/tmp/a.jar"}
+            ),
+            "PYSPARK_REMOTE_INIT_CONF_1": json.dumps({"spark.sql.ansi.enabled": "false"}),
+        }
+        session = mock.Mock()
+        with mock.patch.dict(os.environ, env):
+            RemoteSparkSession.builder.config("spark.sql.session.timeZone", "UTC")._apply_options(
+                session
+            )
+        session.conf._set_all.assert_called_once_with(
+            configs={
+                "spark.sql.shuffle.partitions": "7",
+                "spark.sql.ansi.enabled": "false",
+                "spark.sql.session.timeZone": "UTC",
+            },
+            silent=True,
+        )
+
     def test_default_session_expires_when_client_closes(self):
         s1 = RemoteSparkSession.builder.remote("sc://other").getOrCreate()
         s2 = RemoteSparkSession._get_default_session()
@@ -411,6 +438,34 @@ class SparkConnectSessionBuilderTests(unittest.TestCase):
         s3 = RemoteSparkSession.builder.remote("sc://other").getOrCreate()
 
         self.assertIsNot(s1, s3)
+
+
+@unittest.skipIf(
+    not should_test_connect or is_remote_only(),
+    connect_requirement_message or "Session creation different from local mode",
+)
+class SparkConnectSessionInitConfTests(unittest.TestCase):
+    def test_init_conf_groups_reach_local_server(self):
+        # spark-submit hands its confs to the Python process in groups of ten (see
+        # PythonRunner). The local server started for the session must receive every group.
+        # The keys are not SQL confs, so the only way they can reach the server is through
+        # the SparkConf that _start_connect_server builds from the environment.
+        env = {
+            "PYSPARK_REMOTE_INIT_CONF_LEN": "2",
+            "PYSPARK_REMOTE_INIT_CONF_0": json.dumps({"spark.test.initConf.group0": "0"}),
+            "PYSPARK_REMOTE_INIT_CONF_1": json.dumps({"spark.test.initConf.group1": "1"}),
+        }
+        os.environ.update(env)
+        try:
+            spark = PySparkSession.builder.remote("local[4]").getOrCreate()
+        finally:
+            for k in env:
+                os.environ.pop(k, None)
+        try:
+            self.assertEqual(spark.conf.get("spark.test.initConf.group0"), "0")
+            self.assertEqual(spark.conf.get("spark.test.initConf.group1"), "1")
+        finally:
+            spark.stop()
 
 
 @unittest.skipIf(not should_test_connect, connect_requirement_message)
