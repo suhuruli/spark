@@ -19,6 +19,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from pyspark.errors import PySparkException
 from pyspark.testing.connectutils import (
@@ -32,6 +33,7 @@ if should_test_connect and have_yaml:
     from pyspark.pipelines.cli import (
         LibrariesGlob,
         PipelineSpec,
+        apply_spec_configuration,
         change_dir,
         find_pipeline_spec,
         load_pipeline_spec,
@@ -525,6 +527,105 @@ class CLIUtilityTests(ReusedConnectTestCase):
                 context.exception.getMessageParameters(),
                 {"glob_pattern": "transformations/**/*.py"},
             )
+
+    def test_apply_spec_configuration(self):
+        # A static setting the session was launched with is in effect but cannot be set again, so
+        # it must not be forwarded to the flows. Runtime settings, registered or not, are set on
+        # the session and forwarded.
+        static_key = "spark.sql.warehouse.dir"
+        self.assertFalse(self.spark.conf.isModifiable(static_key))
+        configuration = {
+            "spark.sql.shuffle.partitions": "7",
+            "custom.pipeline.setting": "custom-value",
+            static_key: self.spark.conf.get(static_key),
+        }
+        try:
+            sql_conf = apply_spec_configuration(self.spark, configuration)
+            self.assertEqual(
+                sql_conf,
+                {"spark.sql.shuffle.partitions": "7", "custom.pipeline.setting": "custom-value"},
+            )
+            self.assertEqual(self.spark.conf.get("spark.sql.shuffle.partitions"), "7")
+            self.assertEqual(self.spark.conf.get("custom.pipeline.setting"), "custom-value")
+        finally:
+            self.spark.conf.unset("spark.sql.shuffle.partitions")
+            self.spark.conf.unset("custom.pipeline.setting")
+
+    def test_apply_spec_configuration_static_setting_not_in_effect(self):
+        configuration = {"spark.sql.extensions": "com.example.NotLoadedExtensions"}
+        with self.assertRaises(PySparkException) as context:
+            apply_spec_configuration(self.spark, configuration)
+        self.assertEqual(
+            context.exception.getCondition(), "PIPELINE_SPEC_CONFIGURATION_NOT_SET_AT_LAUNCH"
+        )
+        self.assertEqual(
+            context.exception.getMessageParameters(),
+            {"key": "spark.sql.extensions", "value": "com.example.NotLoadedExtensions"},
+        )
+
+    def test_apply_spec_configuration_invalid_value(self):
+        # Other rejections are not about launch-time settings and surface as they are.
+        with self.assertRaises(PySparkException) as context:
+            apply_spec_configuration(self.spark, {"spark.sql.shuffle.partitions": "-1"})
+        self.assertNotEqual(
+            context.exception.getCondition(), "PIPELINE_SPEC_CONFIGURATION_NOT_SET_AT_LAUNCH"
+        )
+        self.assertIn("spark.sql.shuffle.partitions", str(context.exception))
+
+    def test_run_with_static_configuration_in_effect(self):
+        """A static setting in the spec configuration that the session was launched with must not
+        fail the run when the flows start."""
+        static_key = "spark.sql.warehouse.dir"
+        table_name = "static_configuration_mv"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            spec_path = Path(temp_dir) / "spark-pipeline.yaml"
+            spec_path.write_text(
+                textwrap.dedent(
+                    f"""
+                    name: test_pipeline
+                    storage: file://{temp_dir}/storage
+                    configuration:
+                      {static_key}: "{self.spark.conf.get(static_key)}"
+                    libraries:
+                      - glob:
+                          include: transformations/**
+                    """
+                )
+            )
+            transformations_dir = Path(temp_dir) / "transformations"
+            transformations_dir.mkdir()
+            (transformations_dir / "mv.py").write_text(
+                textwrap.dedent(
+                    f"""
+                    from pyspark import pipelines as dp
+
+                    @dp.materialized_view(name="{table_name}")
+                    def mv():
+                        return spark.range(3)
+                    """
+                )
+            )
+
+            # Run on the shared test session instead of a session of its own, and keep the run
+            # from stopping it.
+            with (
+                mock.patch("pyspark.pipelines.cli.SparkSession") as mock_session,
+                mock.patch.object(self.spark, "stop"),
+                self.table(table_name),
+            ):
+                builder = mock_session.builder
+                builder.config.return_value = builder
+                builder.getOrCreate.return_value = self.spark
+
+                run(
+                    spec_path=spec_path,
+                    full_refresh=[],
+                    full_refresh_all=False,
+                    refresh=[],
+                    dry=False,
+                )
+
+                self.assertEqual(self.spark.table(table_name).count(), 3)
 
 
 if __name__ == "__main__":

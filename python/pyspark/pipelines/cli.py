@@ -29,7 +29,7 @@ import os
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Generator, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Generator, List, Mapping, Optional, Sequence
 
 import yaml
 
@@ -283,6 +283,49 @@ def change_dir(path: Path) -> Generator[None, None, None]:
         os.chdir(prev)
 
 
+def apply_spec_configuration(
+    spark: SparkSession, configuration: Mapping[str, str]
+) -> Mapping[str, str]:
+    """Set the pipeline spec's configuration on the session and return the entries that each flow
+    must also run with, to be forwarded as the dataflow graph's default SQL conf.
+
+    Runtime settings are set on the session and returned. A setting that cannot change once the
+    session exists, such as the static ``spark.sql.extensions``, can only be set when the session
+    is launched; the session builder in :func:`run` does that when the CLI launches the session.
+    Such a setting must not be forwarded: the server would set it on the running session again for
+    every flow, and fail the run with the same rejection. If the session does not already run with
+    the requested value, the spec cannot be honored, and the run fails here, before any flow starts.
+    """
+    runtime_configuration: Dict[str, str] = {}
+    for key, value in configuration.items():
+        if not spark.conf.isModifiable(key) and spark.conf.get(key, None) == value:
+            # The session was launched with this setting, and cannot take it again.
+            continue
+        try:
+            spark.conf.set(key, value)
+        except PySparkException as e:
+            if e.getCondition() not in ("CANNOT_MODIFY_STATIC_CONFIG", "CANNOT_MODIFY_CONFIG"):
+                raise
+            if _current_value(spark, key) != value:
+                raise PySparkException(
+                    errorClass="PIPELINE_SPEC_CONFIGURATION_NOT_SET_AT_LAUNCH",
+                    messageParameters={"key": key, "value": value},
+                ) from e
+        else:
+            runtime_configuration[key] = value
+    return runtime_configuration
+
+
+def _current_value(spark: SparkSession, key: str) -> Optional[str]:
+    """The value the session runs with for ``key``, or None if it has none."""
+    try:
+        return spark.conf.get(key)
+    except PySparkException as e:
+        if e.getCondition() != "SQL_CONF_NOT_FOUND":
+            raise
+        return None
+
+
 def run(
     spec_path: Path,
     full_refresh: Sequence[str],
@@ -321,6 +364,8 @@ def run(
     spark_builder = SparkSession.builder.config(
         "spark.sql.connect.serverStacktrace.enabled", "false"
     )
+    # Settings that can only be set at launch, such as static SQL settings, take effect through
+    # the builder when the CLI launches the session.
     for key, value in spec.configuration.items():
         spark_builder = spark_builder.config(key, value)
 
@@ -328,12 +373,14 @@ def run(
     # Stop the session even if graph creation, registration, or the run itself fails, so a failure
     # after the session is created does not leak it.
     try:
+        sql_conf = apply_spec_configuration(spark, spec.configuration)
+
         log_with_curr_timestamp("Creating dataflow graph...")
         dataflow_graph_id = create_dataflow_graph(
             spark,
             default_catalog=spec.catalog,
             default_database=spec.database,
-            sql_conf=spec.configuration,
+            sql_conf=sql_conf,
         )
 
         log_with_curr_timestamp("Registering graph elements...")

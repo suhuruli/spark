@@ -85,7 +85,7 @@ A YAML-formatted pipeline spec file contains the top-level configuration for the
 - **storage** (Required) – A directory where checkpoints can be stored for streaming tables within the pipeline.
 - **database** (Optional) - The default target database for pipeline outputs. **schema** can alternatively be used as an alias.
 - **catalog** (Optional) - The default target catalog for pipeline outputs.
-- **configuration** (Optional) - Map of Spark configuration properties.
+- **configuration** (Optional) - Map of Spark configuration properties. Properties that can only be set when a Spark session is launched, such as `spark.sql.extensions`, take effect when `spark-pipelines` launches the session. When running against an existing Spark Connect server with `--remote`, they must already be set on that server, and the run fails before any flow starts if they are not.
 
 An example pipeline spec file:
 

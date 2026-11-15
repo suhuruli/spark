@@ -783,6 +783,11 @@
       "Alternatively set a pandas-on-spark option 'compute.fail_on_ansi_mode' to `False` to force it to work, although it can cause unexpected behavior."
     ]
   },
+  "PIPELINE_SPEC_CONFIGURATION_NOT_SET_AT_LAUNCH": {
+    "message": [
+      "Pipeline spec configuration `<key>` can only be set when the Spark session is launched, and the session the pipeline runs on does not have the requested value `<value>`. Set it when launching the Spark session or the Spark Connect server that the pipeline runs on."
+    ]
+  },
   "PIPELINE_SPEC_DICT_KEY_NOT_STRING": {
     "message": [
       "For pipeline spec field `<field_name>`, key should be a string, got <key_type>."
