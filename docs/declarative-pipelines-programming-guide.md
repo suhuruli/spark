@@ -82,7 +82,7 @@ A YAML-formatted pipeline spec file contains the top-level configuration for the
 
 - **name** (Required) - The name of the pipeline project.
 - **libraries** (Required) - The paths with the transformation source files in SQL or Python.
-- **storage** (Required) – A directory where checkpoints can be stored for streaming tables within the pipeline.
+- **storage** (Required) – A directory where checkpoints can be stored for streaming tables within the pipeline. See [Streaming Checkpoints and Flow Changes](#streaming-checkpoints-and-flow-changes) for how checkpoints are laid out and when they need to be reset.
 - **database** (Optional) - The default target database for pipeline outputs. **schema** can alternatively be used as an alias.
 - **catalog** (Optional) - The default target catalog for pipeline outputs.
 - **configuration** (Optional) - Map of Spark configuration properties.
@@ -125,7 +125,7 @@ It also supports several pipeline-specific parameters:
   * `spark-pipeline.yml`
   * `spark-pipeline.yaml`
 
-* `--full-refresh DATASETS` - List of datasets to reset and recompute (comma-separated). This clears all existing data and checkpoints for the specified datasets and recomputes them from scratch.
+* `--full-refresh DATASETS` - List of datasets to reset and recompute (comma-separated). This clears all existing data and checkpoints for the specified datasets and recomputes them from scratch. See [Streaming Checkpoints and Flow Changes](#streaming-checkpoints-and-flow-changes) for when this is needed.
 
 * `--full-refresh-all` - Perform a full graph reset and recompute. This is equivalent to `--full-refresh` for all datasets in the pipeline.
 
@@ -158,6 +158,39 @@ spark-pipelines run --conf spark.sql.shuffle.partitions=200 --driver-memory 4g
 # Run on remote Spark Connect server
 spark-pipelines run --remote sc://my-cluster:15002
 ```
+
+#### Streaming Checkpoints and Flow Changes
+
+Each streaming flow keeps a Structured Streaming checkpoint under the pipeline's `storage` directory, at `<storage>/_checkpoints/<catalog>/<schema>/<table>/<flow name>/<n>`. The numbered directory `n` starts at `0`, and each full refresh of the target starts a new one. The checkpoint records which source data the flow has already processed and, for stateful operations, the state those operations have built up. It is what lets the next run continue where the previous run stopped instead of reprocessing everything.
+
+A checkpoint only fits the query that wrote it. When a flow processes its first batch of new input after its definition changed, Structured Streaming compares the query with what the checkpoint recorded, and the flow fails if they no longer match. SDP retries the flow and then stops the run with the error. Changes that make a checkpoint unusable include:
+
+- **Adding, removing, or replacing a stateful operation.** Streaming aggregations (`GROUP BY`), deduplication (`dropDuplicates`, `dropDuplicatesWithinWatermark`), stream-stream joins, and `mapGroupsWithState`, `flatMapGroupsWithState`, and `transformWithState` are stateful. Replacing or removing one fails with `STREAMING_STATEFUL_OPERATOR_NOT_MATCH_IN_STATE_METADATA`. Adding one to a flow that previously had none fails with `STREAMING_STATEFUL_OPERATOR_MISSING_STATE_DIRECTORY`.
+- **Changing the number or type of the grouping columns or aggregated values** of an existing aggregation. The saved state has a different schema from the one the query now needs, which fails with `STATE_STORE_KEY_SCHEMA_NOT_COMPATIBLE` or `STATE_STORE_VALUE_SCHEMA_NOT_COMPATIBLE`.
+- **Adding or removing a streaming source**, for example by unioning in a second stream. The saved offsets cover a different number of sources than the query now reads.
+
+For example, replacing a `GROUP BY` aggregation with `dropDuplicates` fails on the next run with new input:
+
+```
+[STREAMING_STATEFUL_OPERATOR_NOT_MATCH_IN_STATE_METADATA] Streaming stateful operator name does not match with the operator in state metadata. This likely to happen when user adds/removes/changes stateful operator of existing streaming query.
+Stateful operators in the metadata: [(OperatorId: 0 -> OperatorName: stateStoreSave)]; Stateful operators in current batch: [(OperatorId: 0 -> OperatorName: dedupe)]. SQLSTATE: 42K03
+```
+
+A change that touches neither stateful operations nor sources, such as a different filter, keeps the checkpoint usable. The flow continues from where it left off, and rows it already wrote are not recomputed.
+
+**Recovering with a full refresh.** Run a full refresh of the dataset the flow writes to:
+
+```bash
+spark-pipelines run --full-refresh event_counts
+```
+
+`--full-refresh` takes dataset names (tables or sinks), not flow names, and resets every flow that writes to each listed dataset. For a table, the run truncates the table, gives each of its flows a new numbered checkpoint directory, and recomputes the table from scratch with the current flow definitions. Keep the following in mind:
+
+- Only the listed datasets are reset. A streaming table that reads from a refreshed table keeps its own checkpoint and data, so list it too if it must be recomputed from the refreshed data.
+- Tables with the table property `pipelines.reset.allowed` set to `false` cannot be reset: `--full-refresh` fails for them and `--full-refresh-all` skips them.
+- Previous checkpoint directories are left in place. They are no longer used, and you can delete them once the refreshed run has completed.
+
+**Renaming a flow.** The flow name is part of the checkpoint path, so renaming a flow (the `name` argument of `@dp.append_flow`, the function name when `name` is not given, or the name in `CREATE FLOW`) gives it a new, empty checkpoint directory on the next run. The renamed flow starts over as if it had never run, while the target table keeps the rows the old flow wrote, and the old checkpoint directory stays behind unused. To keep the table and the checkpoint consistent, full refresh the target in the same run in which you rename a flow.
 
 ### `spark-pipelines dry-run`
 
