@@ -26,6 +26,7 @@ import argparse
 import glob
 import importlib.util
 import os
+import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -360,7 +361,7 @@ def parse_table_list(value: str) -> List[str]:
     return [table.strip() for table in value.split(",") if table.strip()]
 
 
-def main() -> None:
+def main(argv: Optional[Sequence[str]] = None) -> None:
     """The entry point of spark-pipelines CLI."""
     parser = argparse.ArgumentParser(description="Pipelines CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -411,7 +412,19 @@ def main() -> None:
         required=True,
     )
 
-    args = parser.parse_args()
+    if argv is None:
+        argv = sys.argv[1:]
+    # An option placed ahead of the subcommand, such as "--conf k=v run", makes argparse report
+    # the option's value as an invalid choice for the subcommand, which hides the actual mistake.
+    # Report the misplaced argument itself and show where the subcommand belongs.
+    if argv and argv[0] not in ("-h", "--help") and (argv[0].startswith("-") or "=" in argv[0]):
+        parser.error(
+            f"unexpected argument '{argv[0]}' before the subcommand. The subcommand "
+            f"({', '.join(subparsers.choices)}) must come first, followed by its options, "
+            "for example: spark-pipelines run --spec <file>"
+        )
+
+    args = parser.parse_args(argv)
     assert args.command in ["run", "dry-run", "init"]
 
     if args.command in ["run", "dry-run"]:

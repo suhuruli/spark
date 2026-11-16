@@ -15,9 +15,11 @@
 # limitations under the License.
 #
 
+import io
 import tempfile
 import textwrap
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from pyspark.errors import PySparkException
@@ -35,6 +37,7 @@ if should_test_connect and have_yaml:
         change_dir,
         find_pipeline_spec,
         load_pipeline_spec,
+        main,
         register_definitions,
         run,
         unpack_pipeline_spec,
@@ -441,6 +444,47 @@ class CLIUtilityTests(ReusedConnectTestCase):
             self.assertEqual(
                 context.exception.getCondition(), "CONFLICTING_PIPELINE_REFRESH_OPTIONS"
             )
+
+    def test_option_before_subcommand_reports_misplaced_argument(self):
+        # "--conf k=v run" used to fail with "invalid choice: 'k=v'", naming the option's value
+        # rather than the misplaced option. The error should point at the subcommand order.
+        for argv in (
+            ["--conf", "spark.sql.shuffle.partitions=4", "run", "--spec", "pipeline.yaml"],
+            ["--conf", "k=v", "dry-run"],
+            ["spark.sql.shuffle.partitions=4", "run"],
+        ):
+            with self.subTest(argv=argv):
+                stderr = io.StringIO()
+                with self.assertRaises(SystemExit) as context, redirect_stderr(stderr):
+                    main(argv)
+                self.assertEqual(context.exception.code, 2)
+                self.assertIn(
+                    f"unexpected argument '{argv[0]}' before the subcommand. "
+                    "The subcommand (run, dry-run, init) must come first, followed by its options, "
+                    "for example: spark-pipelines run --spec <file>",
+                    stderr.getvalue(),
+                )
+
+    def test_other_argument_errors_keep_argparse_behavior(self):
+        # Only a leading option or key=value token gets the subcommand-order hint. Options after
+        # the subcommand, unknown subcommands and --help are still handled by argparse itself.
+        for argv, expected in (
+            (["run", "--conf", "k=v"], "unrecognized arguments: --conf k=v"),
+            (["bogus"], "invalid choice: 'bogus'"),
+        ):
+            with self.subTest(argv=argv):
+                stderr = io.StringIO()
+                with self.assertRaises(SystemExit) as context, redirect_stderr(stderr):
+                    main(argv)
+                self.assertEqual(context.exception.code, 2)
+                self.assertIn(expected, stderr.getvalue())
+                self.assertNotIn("before the subcommand", stderr.getvalue())
+
+        stdout = io.StringIO()
+        with self.assertRaises(SystemExit) as context, redirect_stdout(stdout):
+            main(["--help"])
+        self.assertEqual(context.exception.code, 0)
+        self.assertIn("{run,dry-run,init}", stdout.getvalue())
 
     def test_parse_table_list_single_table(self):
         """Test parsing a single table name."""
