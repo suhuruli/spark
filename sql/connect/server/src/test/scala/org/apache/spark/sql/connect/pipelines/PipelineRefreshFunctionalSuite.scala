@@ -21,7 +21,7 @@ import scala.collection.mutable.ArrayBuffer
 import scala.jdk.CollectionConverters._
 
 import org.apache.spark.connect.proto.{OutputType, PipelineCommand, PipelineEvent}
-import org.apache.spark.sql.QueryTest
+import org.apache.spark.sql.{AnalysisException, QueryTest}
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.connect.service.{SessionKey, SparkConnectService}
 import org.apache.spark.sql.pipelines.utils.{EventVerificationTestHelpers, TestPipelineUpdateContextMixin}
@@ -340,6 +340,36 @@ class PipelineRefreshFunctionalSuite
       assert(
         exception.getMessage.contains(
           "Datasets specified for refresh and full refresh cannot overlap"))
+    }
+  }
+
+  test("validation: refresh selection must only name datasets defined in the pipeline") {
+    withRawBlockingStub { implicit stub =>
+      val graphId = createDataflowGraph
+      val pipeline = createTestPipeline(graphId)
+      registerPipelineOutputs(pipeline)
+
+      // "a" is defined in the pipeline. "bb" is a typo and "other_schema.mv" is qualified with a
+      // schema that "mv" is not defined in, so only those two names are reported.
+      val startRun = PipelineCommand.StartRun
+        .newBuilder()
+        .setDataflowGraphId(graphId)
+        .setStorage(storageRoot)
+        .addRefreshSelection("a")
+        .addRefreshSelection("bb")
+        .addFullRefreshSelection("other_schema.mv")
+        .build()
+
+      val exception = intercept[AnalysisException] {
+        startPipelineAndWaitForCompletion(startRun)
+      }
+      checkError(
+        exception = exception,
+        condition = "PIPELINE_REFRESH_SELECTION_UNKNOWN_DATASETS",
+        parameters = Map(
+          "datasetNames" -> "`spark_catalog`.`default`.`bb`, `spark_catalog`.`other_schema`.`mv`"))
+      // The run was rejected before any flow started, so no table was created.
+      assert(!spark.catalog.tableExists("spark_catalog.default.a"))
     }
   }
 

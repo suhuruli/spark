@@ -17,6 +17,8 @@
 
 package org.apache.spark.sql.pipelines.graph
 
+import org.apache.spark.sql.AnalysisException
+import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.pipelines.common.RunState
 import org.apache.spark.sql.pipelines.logging.{
   ConstructPipelineEvent,
@@ -46,6 +48,7 @@ class PipelineExecution(context: PipelineUpdateContext) {
   def startPipeline(): Unit = synchronized {
     // Initialize the graph.
     val resolvedGraph = resolveGraph()
+    validateRefreshSelection(resolvedGraph)
     if (context.fullRefreshTables.nonEmpty) {
       State.reset(resolvedGraph, context)
     }
@@ -106,6 +109,28 @@ class PipelineExecution(context: PipelineUpdateContext) {
       details = RunProgress(terminationReason.terminalState),
       exception = terminationReason.cause
     )
+  }
+
+  /**
+   * Fails the run if the refresh or full refresh selection names a dataset that is not a table or
+   * sink of the pipeline. Selected names are matched by exact identifier, so a misspelled or
+   * differently qualified name would otherwise select nothing and the run would complete without
+   * refreshing what was asked for.
+   */
+  private def validateRefreshSelection(graph: DataflowGraph): Unit = {
+    val selectedIdentifiers = Seq(context.refreshTables, context.fullRefreshTables).flatMap {
+      case SomeTables(identifiers) => identifiers
+      case _ => Set.empty[TableIdentifier]
+    }
+    val unknownIdentifiers = selectedIdentifiers.filterNot(graph.output.contains)
+    if (unknownIdentifiers.nonEmpty) {
+      throw new AnalysisException(
+        errorClass = "PIPELINE_REFRESH_SELECTION_UNKNOWN_DATASETS",
+        messageParameters = Map(
+          "datasetNames" -> unknownIdentifiers.map(_.quotedString).distinct.sorted.mkString(", ")
+        )
+      )
+    }
   }
 
   private def resolveGraph(): DataflowGraph = {

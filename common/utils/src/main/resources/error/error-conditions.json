@@ -7317,6 +7317,13 @@
     ],
     "sqlState" : "0A000"
   },
+  "PIPELINE_REFRESH_SELECTION_UNKNOWN_DATASETS" : {
+    "message" : [
+      "The refresh selection names datasets that are not defined in the pipeline: <datasetNames>.",
+      "Each name must match a table or sink defined in the pipeline. Unqualified names are resolved against the pipeline's default catalog and schema."
+    ],
+    "sqlState" : "42704"
+  },
   "PIPELINE_RUN_FAILED" : {
     "message" : [
       "<message>"

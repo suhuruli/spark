@@ -19,14 +19,14 @@ package org.apache.spark.sql.pipelines.graph
 
 import org.scalatest.time.{Seconds, Span}
 
-import org.apache.spark.sql.{functions, Row}
+import org.apache.spark.sql.{functions, AnalysisException, Row}
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.classic.{DataFrame, Dataset}
 import org.apache.spark.sql.connector.catalog.{CatalogV2Util, Identifier, TableCatalog}
 import org.apache.spark.sql.execution.streaming.runtime.MemoryStream
 import org.apache.spark.sql.pipelines.common.{FlowStatus, RunState}
 import org.apache.spark.sql.pipelines.graph.TriggeredGraphExecution.StreamState
-import org.apache.spark.sql.pipelines.logging.{EventLevel, FlowProgress}
+import org.apache.spark.sql.pipelines.logging.{EventLevel, FlowProgress, RunProgress}
 import org.apache.spark.sql.pipelines.utils.{ExecutionTest, TestGraphRegistrationContext}
 import org.apache.spark.sql.test.SharedSparkSession
 import org.apache.spark.sql.types.{IntegerType, StringType, StructType}
@@ -993,6 +993,99 @@ class TriggeredGraphExecutionSuite extends ExecutionTest with SharedSparkSession
         (EventLevel.INFO, FlowStatus.COMPLETED)
       )
     )
+  }
+
+  test("refresh selection with a name that matches no dataset fails before any flow starts") {
+    val session = spark
+    import session.implicits._
+
+    val pipelineDef = new TestGraphRegistrationContext(spark) {
+      registerMaterializedView("orders", query = dfFlowFunc(Seq(1, 2).toDF("x")))
+      registerMaterializedView("customers", query = dfFlowFunc(Seq(3).toDF("x")))
+    }
+    val unresolvedGraph = pipelineDef.toDataflowGraph
+
+    /** Runs the pipeline and asserts that it was rejected because of `expectedUnknownNames`. */
+    def assertRunRejected(
+        refreshTables: TableFilter,
+        fullRefreshTables: TableFilter,
+        expectedUnknownNames: Seq[TableIdentifier]): Unit = {
+      val updateContext = TestPipelineUpdateContext(
+        spark = spark,
+        unresolvedGraph = unresolvedGraph,
+        storageRoot = storageRoot,
+        fullRefreshTables = fullRefreshTables,
+        refreshTables = refreshTables,
+        resetCheckpointFlows = NoFlows
+      )
+      updateContext.pipelineExecution.runPipeline()
+      updateContext.pipelineExecution.awaitCompletion()
+
+      val runFailure = updateContext.eventBuffer.getEvents.collectFirst {
+        case e if e.details == RunProgress(RunState.FAILED) => e
+      }
+      assert(
+        runFailure.isDefined,
+        s"Expected the run to fail, events: ${updateContext.eventBuffer.getEvents}"
+      )
+      checkError(
+        exception = runFailure.flatMap(_.error).get.asInstanceOf[AnalysisException],
+        condition = "PIPELINE_REFRESH_SELECTION_UNKNOWN_DATASETS",
+        parameters = Map(
+          "datasetNames" -> expectedUnknownNames.map(_.quotedString).sorted.mkString(", ")
+        )
+      )
+      // The run was rejected before any flow started, so nothing was materialized.
+      Seq("orders", "customers").foreach { name =>
+        assertNoFlowProgressEvent(
+          eventBuffer = updateContext.eventBuffer,
+          identifier = fullyQualifiedIdentifier(name),
+          flowStatus = FlowStatus.STARTING
+        )
+        assert(!spark.catalog.tableExists(fullyQualifiedIdentifier(name).toString))
+      }
+    }
+
+    // A misspelled name is rejected even when the other names in the selection are valid.
+    assertRunRejected(
+      refreshTables = SomeTables(
+        Set(fullyQualifiedIdentifier("orders"), fullyQualifiedIdentifier("ordrs"))
+      ),
+      fullRefreshTables = NoTables,
+      expectedUnknownNames = Seq(fullyQualifiedIdentifier("ordrs"))
+    )
+    // A name qualified with a schema the dataset is not defined in is rejected.
+    val ordersInOtherSchema = fullyQualifiedIdentifier("orders", database = Some("other_schema"))
+    assertRunRejected(
+      refreshTables = NoTables,
+      fullRefreshTables = SomeTables(Set(ordersInOtherSchema)),
+      expectedUnknownNames = Seq(ordersInOtherSchema)
+    )
+    // Unknown names from the refresh and the full refresh selection are reported together.
+    assertRunRejected(
+      refreshTables = SomeTables(Set(fullyQualifiedIdentifier("ordrs"))),
+      fullRefreshTables = SomeTables(Set(fullyQualifiedIdentifier("custmers"))),
+      expectedUnknownNames =
+        Seq(fullyQualifiedIdentifier("custmers"), fullyQualifiedIdentifier("ordrs"))
+    )
+
+    // A selection that only names datasets defined in the pipeline runs as before.
+    val updateContext = TestPipelineUpdateContext(
+      spark = spark,
+      unresolvedGraph = unresolvedGraph,
+      storageRoot = storageRoot,
+      refreshTables = SomeTables(Set(fullyQualifiedIdentifier("orders"))),
+      resetCheckpointFlows = NoFlows
+    )
+    updateContext.pipelineExecution.runPipeline()
+    updateContext.pipelineExecution.awaitCompletion()
+    assertRunProgressEvent(
+      eventBuffer = updateContext.eventBuffer,
+      state = RunState.COMPLETED,
+      expectedEventLevel = EventLevel.INFO
+    )
+    checkAnswer(spark.read.table(fullyQualifiedIdentifier("orders").toString), Seq(Row(1), Row(2)))
+    assert(!spark.catalog.tableExists(fullyQualifiedIdentifier("customers").toString))
   }
 
   test("flow fails to resolve") {

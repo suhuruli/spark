@@ -136,6 +136,7 @@ It also supports several pipeline-specific parameters:
 If no refresh options are specified, a default incremental update is performed. The refresh parameters are mutually exclusive:
 - `--full-refresh-all` cannot be combined with `--full-refresh` or `--refresh`
 - `--full-refresh` and `--refresh` can be used together to specify different behaviors for different datasets
+- Every dataset named in `--full-refresh` or `--refresh` must be defined in the pipeline. If a name does not match any table or sink, for example because of a typo or a different qualification, the run fails before any flow starts and the error lists the names that did not match
 
 #### Examples
 
