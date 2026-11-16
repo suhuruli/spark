@@ -18,6 +18,7 @@
 package org.apache.spark.sql.pipelines.graph
 
 import org.apache.spark.sql.AnalysisException
+import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.execution.streaming.runtime.MemoryStream
 import org.apache.spark.sql.pipelines.autocdc.{ChangeArgs, ColumnSelection, ScdType, UnqualifiedColumnName}
 import org.apache.spark.sql.pipelines.utils.{PipelineTest, TestGraphRegistrationContext}
@@ -514,6 +515,29 @@ class ConnectInvalidPipelineSuite extends PipelineTest with SharedSparkSession {
       condition = "INVALID_FLOW_QUERY_TYPE.STREAMING_RELATION_FOR_ONCE_FLOW",
       parameters = Map(
         "flowIdentifier" -> fullyQualifiedIdentifier("once_flow").quotedString
+      )
+    )
+  }
+
+  test("Sink flow backed by batch relation fails validation") {
+    val session = spark
+    import session.implicits._
+
+    val graph = new TestGraphRegistrationContext(spark) {
+      registerSink("sink_a", format = "memory")
+      registerFlow("sink_a", "batch_flow", query = dfFlowFunc(Seq(1, 2).toDF()))
+    }.resolveToDataflowGraph()
+
+    val ex = intercept[AnalysisException] {
+      validateGraph(graph)
+    }
+
+    checkError(
+      exception = ex,
+      condition = "INVALID_FLOW_QUERY_TYPE.BATCH_RELATION_FOR_SINK",
+      parameters = Map(
+        "flowIdentifier" -> TableIdentifier("batch_flow").quotedString,
+        "sinkIdentifier" -> TableIdentifier("sink_a").quotedString
       )
     )
   }

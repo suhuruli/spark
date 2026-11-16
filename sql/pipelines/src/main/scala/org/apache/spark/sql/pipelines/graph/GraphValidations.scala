@@ -98,14 +98,15 @@ trait GraphValidations extends Logging {
 
   /**
    * Validate that each resolved flow is correctly either a streaming flow or non-streaming flow,
-   * depending on the flow type (ex. once flow vs non-once flow) and the dataset type the flow
-   * writes to (ex. streaming table vs materialized view).
+   * depending on the flow type (ex. once flow vs non-once flow) and the output type the flow
+   * writes to (ex. streaming table vs materialized view vs sink).
    */
   protected[graph] def validateFlowStreamingness(): Unit = {
     flowsTo.foreach { case (destTableIdentifier, flowsToDataset) =>
-      // The identifier should correspond to exactly one of a table or view
+      // The identifier should correspond to exactly one of a table, view or sink
       val destTableOpt = table.get(destTableIdentifier)
       val destViewOpt = view.get(destTableIdentifier)
+      val destSinkOpt = sink.get(destTableIdentifier)
 
       val resolvedFlowsToDataset: Seq[ResolvedFlow] = flowsToDataset.collect {
         case rf: ResolvedFlow => rf
@@ -115,6 +116,19 @@ trait GraphValidations extends Logging {
         // A flow must be successfully analyzed, thus resolved, in order to determine if it is
         // streaming or not. Unresolved flows will throw an exception anyway via
         // [[validateSuccessfulFlowAnalysis]], so don't check them here.
+
+        // Sinks accept streaming queries only, whatever the flow type: there is no batch write
+        // path for a sink, so a batch flow must be rejected here rather than at planning time.
+        if (destSinkOpt.isDefined && !resolvedFlow.df.isStreaming) {
+          throw new AnalysisException(
+            errorClass = "INVALID_FLOW_QUERY_TYPE.BATCH_RELATION_FOR_SINK",
+            messageParameters = Map(
+              "flowIdentifier" -> resolvedFlow.identifier.quotedString,
+              "sinkIdentifier" -> destTableIdentifier.quotedString
+            )
+          )
+        }
+
         if (resolvedFlow.once) {
           // Once flows by definition should be batch flows, not streaming.
           if (resolvedFlow.df.isStreaming) {

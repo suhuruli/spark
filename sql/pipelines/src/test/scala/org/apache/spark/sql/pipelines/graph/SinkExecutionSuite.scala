@@ -19,6 +19,7 @@ package org.apache.spark.sql.pipelines.graph
 
 import org.apache.hadoop.fs.Path
 
+import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.classic.DataFrame
 import org.apache.spark.sql.execution.streaming.runtime.{MemoryStream, StreamingQueryWrapper}
@@ -107,6 +108,32 @@ class SinkExecutionSuite extends ExecutionTest with SharedSparkSession {
         Seq(1, 2, 3, 4).toDF().collect().toSeq
       )
     }
+  }
+
+  test("writing a batch relation to a sink fails before execution") {
+    val session = spark
+    import session.implicits._
+
+    val unresolvedGraph = new TestGraphRegistrationContext(spark) {
+      registerTemporaryView("a", query = dfFlowFunc(Seq(1, 2, 3).toDF()))
+      registerSink("sink_a", format = "memory")
+      registerFlow("sink_a", "batch_flow_to_sink_a", query = readFlowFunc("a"))
+    }.toDataflowGraph
+    val updateContext = TestPipelineUpdateContext(spark, unresolvedGraph, storageRoot)
+
+    val ex = intercept[AnalysisException] {
+      updateContext.pipelineExecution.startPipeline()
+      updateContext.pipelineExecution.awaitCompletion()
+    }
+    checkError(
+      exception = ex,
+      condition = "INVALID_FLOW_QUERY_TYPE.BATCH_RELATION_FOR_SINK",
+      parameters = Map(
+        "flowIdentifier" -> TableIdentifier("batch_flow_to_sink_a").quotedString,
+        "sinkIdentifier" -> TableIdentifier("sink_a").quotedString
+      )
+    )
+    assert(updateContext.pipelineExecution.graphExecution.isEmpty)
   }
 
   def verifyCheckpointLocation(
