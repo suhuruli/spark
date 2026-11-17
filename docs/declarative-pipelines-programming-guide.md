@@ -180,6 +180,8 @@ Your pipelines implemented with the Python API must import this module. It's rec
 from pyspark import pipelines as dp
 ```
 
+The decorators and functions in this module, such as `@dp.materialized_view`, do not run a query or create a table themselves. They register a dataset or flow definition with the pipeline that is being defined, and a pipeline is being defined only while `spark-pipelines run` or `spark-pipelines dry-run` loads the source files matched by the `libraries` section of the spec. Running a source file on its own, for example with `python transformations/my_view.py` or in an interactive `pyspark` session, does not register anything: it fails with `GRAPH_ELEMENT_DEFINED_OUTSIDE_OF_DECLARATIVE_PIPELINE` as soon as the first definition runs. To check that your definitions load without writing any data, use `spark-pipelines dry-run`.
+
 ### The Spark Session in Python Pipelines
 
 In Spark 4.1, every pipeline file had to declare `spark = SparkSession.active()` explicitly. Starting in Spark 4.2, the framework injects spark into each pipeline file's module namespace, so the explicit assignment is no longer required. 
