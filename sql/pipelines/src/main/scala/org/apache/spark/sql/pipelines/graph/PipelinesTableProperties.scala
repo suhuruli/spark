@@ -38,6 +38,15 @@ object PipelinesTableProperties {
     buildProp("pipelines.reset.allowed", default = true)
 
   /**
+   * Key of the table property recording the storage root of the pipeline a table belongs to. The
+   * pipeline that creates a table, or recomputes an existing one from scratch, records its own
+   * storage root here, and a run that would recompute a table recording another pipeline's storage
+   * root is rejected instead of silently replacing that pipeline's data. The property is written by
+   * the pipeline itself; it is deliberately not registered as a user-settable property.
+   */
+  val storageRootProperty: String = s"${pipelinesPrefix}storageRoot"
+
+  /**
    * Validates that all known pipeline properties are valid and can be parsed.
    * Also warn the user if they try to set an unknown pipelines property, or any
    * property that looks suspiciously similar to a known pipeline property.

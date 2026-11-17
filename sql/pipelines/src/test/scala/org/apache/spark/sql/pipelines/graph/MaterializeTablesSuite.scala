@@ -20,6 +20,8 @@ package org.apache.spark.sql.pipelines.graph
 import scala.collection.mutable
 import scala.jdk.CollectionConverters._
 
+import org.apache.hadoop.fs.Path
+
 import org.apache.spark.SparkThrowable
 import org.apache.spark.sql.{AnalysisException, Row, SQLContext}
 import org.apache.spark.sql.connector.catalog.{
@@ -37,6 +39,7 @@ import org.apache.spark.sql.pipelines.graph.DatasetManager.TableMaterializationE
 import org.apache.spark.sql.pipelines.utils.{BaseCoreExecutionTest, TestGraphRegistrationContext}
 import org.apache.spark.sql.test.SharedSparkSession
 import org.apache.spark.sql.types._
+import org.apache.spark.util.Utils
 import org.apache.spark.util.Utils.exceptionString
 
 class DefaultMaterializeTablesSuite extends MaterializeTablesSuite with SharedSparkSession
@@ -1622,6 +1625,146 @@ abstract class MaterializeTablesSuite extends BaseCoreExecutionTest {
 
       assert(loadTableFromRecordingCatalog("t").properties().get("p.stale") == "old")
     }
+  }
+
+  // =============== Table ownership across pipelines ===============
+
+  private val testDb = TestGraphRegistrationContext.DEFAULT_DATABASE
+
+  /** The storage root of a second, unrelated pipeline. */
+  private def anotherStorageRoot(): String = s"file://${Utils.createTempDir().getCanonicalPath}"
+
+  /** The pipeline storage root recorded on the materialized table `name`, if any. */
+  private def recordedStorageRoot(name: String): Option[String] = {
+    val catalog = spark.sessionState.catalogManager.currentCatalog.asInstanceOf[TableCatalog]
+    val table = catalog.loadTable(Identifier.of(Array(testDb), name))
+    Option(table.properties().get("pipelines.storageRoot"))
+  }
+
+  private def materializedViewGraph(names: String*): DataflowGraph = {
+    new TestGraphRegistrationContext(spark) {
+      names.foreach { name =>
+        registerMaterializedView(name, query = dfFlowFunc(Seq(1, 2).toDF("x")))
+      }
+    }.resolveToDataflowGraph()
+  }
+
+  private def streamingTableGraph(name: String): DataflowGraph = {
+    implicit val sqlCtx: SQLContext = spark.sqlContext
+    new TestGraphRegistrationContext(spark) {
+      registerTable(
+        name,
+        query = Option(dfFlowFunc(MemoryStream[Int].toDF().select($"value" as "x"))))
+    }.resolveToDataflowGraph()
+  }
+
+  private def assertOwnedByAnotherPipeline(
+      ex: TableMaterializationException,
+      name: String,
+      recordedStorageRoot: String,
+      storageRoot: String): Unit = {
+    checkError(
+      exception = ex.cause.asInstanceOf[AnalysisException],
+      condition = "PIPELINE_TABLE_OWNED_BY_ANOTHER_PIPELINE",
+      parameters = Map(
+        "tableName" -> fullyQualifiedIdentifier(name).quotedString,
+        "recordedStorageRoot" -> new Path(recordedStorageRoot).toString,
+        "storageRoot" -> new Path(storageRoot).toString))
+  }
+
+  test("a materialized view is not recreated by a pipeline with a different storage root") {
+    materializeGraph(materializedViewGraph("mv"), storageRoot = storageRoot)
+    sql(s"INSERT INTO $testDb.mv VALUES (1), (2)")
+    assert(recordedStorageRoot("mv").contains(new Path(storageRoot).toString))
+
+    val otherStorageRoot = anotherStorageRoot()
+    val ex = intercept[TableMaterializationException] {
+      materializeGraph(materializedViewGraph("mv"), storageRoot = otherStorageRoot)
+    }
+    assertOwnedByAnotherPipeline(
+      ex, "mv", recordedStorageRoot = storageRoot, storageRoot = otherStorageRoot)
+    // The other pipeline's table is left as it was: same rows, same owner.
+    checkAnswer(spark.table(s"$testDb.mv"), Seq(Row(1), Row(2)))
+    assert(recordedStorageRoot("mv").contains(new Path(storageRoot).toString))
+  }
+
+  test("the pipeline that created a materialized view recomputes it on a later run") {
+    materializeGraph(materializedViewGraph("mv"), storageRoot = storageRoot)
+    sql(s"INSERT INTO $testDb.mv VALUES (1), (2)")
+
+    // Same storage root, so the materialized view is recomputed from scratch as before.
+    materializeGraph(materializedViewGraph("mv"), storageRoot = storageRoot)
+    assert(spark.table(s"$testDb.mv").isEmpty)
+    assert(recordedStorageRoot("mv").contains(new Path(storageRoot).toString))
+  }
+
+  test("a streaming table is only full refreshed by the pipeline that owns it") {
+    val graph = streamingTableGraph("st")
+    materializeGraph(graph, storageRoot = storageRoot)
+    sql(s"INSERT INTO $testDb.st VALUES (1), (2)")
+
+    // An incremental run from another pipeline keeps the data and leaves ownership alone.
+    val otherStorageRoot = anotherStorageRoot()
+    materializeGraph(graph, storageRoot = otherStorageRoot)
+    checkAnswer(spark.table(s"$testDb.st"), Seq(Row(1), Row(2)))
+    assert(recordedStorageRoot("st").contains(new Path(storageRoot).toString))
+
+    // A full refresh from another pipeline would wipe the owner's data, so it is rejected.
+    val ex = intercept[TableMaterializationException] {
+      materializeGraph(
+        graph,
+        contextOpt = Some(TestPipelineUpdateContext(
+          spark, graph, otherStorageRoot, fullRefreshTables = AllTables)),
+        storageRoot = otherStorageRoot)
+    }
+    assertOwnedByAnotherPipeline(
+      ex, "st", recordedStorageRoot = storageRoot, storageRoot = otherStorageRoot)
+    checkAnswer(spark.table(s"$testDb.st"), Seq(Row(1), Row(2)))
+
+    // The owning pipeline can still full refresh it.
+    materializeGraph(
+      graph,
+      contextOpt = Some(TestPipelineUpdateContext(
+        spark, graph, storageRoot, fullRefreshTables = AllTables)),
+      storageRoot = storageRoot)
+    assert(spark.table(s"$testDb.st").isEmpty)
+  }
+
+  test("a table without a recorded storage root is adopted by the pipeline that recomputes it") {
+    sql(s"CREATE TABLE $testDb.mv (x INT)")
+    sql(s"INSERT INTO $testDb.mv VALUES (1), (2)")
+    assert(recordedStorageRoot("mv").isEmpty)
+
+    materializeGraph(materializedViewGraph("mv"), storageRoot = storageRoot)
+    assert(spark.table(s"$testDb.mv").isEmpty)
+    assert(recordedStorageRoot("mv").contains(new Path(storageRoot).toString))
+
+    // From now on the table is reserved for the pipeline that adopted it.
+    val otherStorageRoot = anotherStorageRoot()
+    val ex = intercept[TableMaterializationException] {
+      materializeGraph(materializedViewGraph("mv"), storageRoot = otherStorageRoot)
+    }
+    assertOwnedByAnotherPipeline(
+      ex, "mv", recordedStorageRoot = storageRoot, storageRoot = otherStorageRoot)
+  }
+
+  test("no table is touched when any table of the run belongs to another pipeline") {
+    val otherStorageRoot = anotherStorageRoot()
+    // `a` belongs to the pipeline about to run, `b` to a different one.
+    materializeGraph(materializedViewGraph("a"), storageRoot = otherStorageRoot)
+    sql(s"INSERT INTO $testDb.a VALUES (3)")
+    materializeGraph(materializedViewGraph("b"), storageRoot = storageRoot)
+    sql(s"INSERT INTO $testDb.b VALUES (1), (2)")
+
+    val ex = intercept[TableMaterializationException] {
+      materializeGraph(materializedViewGraph("a", "b"), storageRoot = otherStorageRoot)
+    }
+    assertOwnedByAnotherPipeline(
+      ex, "b", recordedStorageRoot = storageRoot, storageRoot = otherStorageRoot)
+    // Ownership is checked for every table before any of them is truncated, so `a` kept its rows
+    // even though this pipeline owns it.
+    checkAnswer(spark.table(s"$testDb.a"), Seq(Row(3)))
+    checkAnswer(spark.table(s"$testDb.b"), Seq(Row(1), Row(2)))
   }
 }
 

@@ -7337,6 +7337,12 @@
     ],
     "sqlState" : "42K03"
   },
+  "PIPELINE_TABLE_OWNED_BY_ANOTHER_PIPELINE" : {
+    "message" : [
+      "Cannot refresh table <tableName> from this pipeline because it belongs to a different pipeline. The table records the pipeline storage location <recordedStorageRoot>, but this pipeline uses <storageRoot>. Refreshing it from here would replace the other pipeline's data, so the table was left unchanged. Use a different table name in this pipeline. If the table does belong to this pipeline, for example because its storage location changed, drop the table and run the pipeline again."
+    ],
+    "sqlState" : "42P07"
+  },
   "PIPE_OPERATOR_AGGREGATE_EXPRESSION_CONTAINS_NO_AGGREGATE_FUNCTION" : {
     "message" : [
       "Non-grouping expression <expr> is provided as an argument to the |> AGGREGATE pipe operator but does not contain any aggregate function; please update it to include an aggregate function and then retry the query again."

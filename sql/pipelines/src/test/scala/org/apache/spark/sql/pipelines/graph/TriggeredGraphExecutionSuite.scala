@@ -19,17 +19,20 @@ package org.apache.spark.sql.pipelines.graph
 
 import org.scalatest.time.{Seconds, Span}
 
+import org.apache.spark.SparkThrowable
 import org.apache.spark.sql.{functions, Row}
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.classic.{DataFrame, Dataset}
 import org.apache.spark.sql.connector.catalog.{CatalogV2Util, Identifier, TableCatalog}
 import org.apache.spark.sql.execution.streaming.runtime.MemoryStream
 import org.apache.spark.sql.pipelines.common.{FlowStatus, RunState}
+import org.apache.spark.sql.pipelines.graph.DatasetManager.TableMaterializationException
 import org.apache.spark.sql.pipelines.graph.TriggeredGraphExecution.StreamState
 import org.apache.spark.sql.pipelines.logging.{EventLevel, FlowProgress}
 import org.apache.spark.sql.pipelines.utils.{ExecutionTest, TestGraphRegistrationContext}
 import org.apache.spark.sql.test.SharedSparkSession
 import org.apache.spark.sql.types.{IntegerType, StringType, StructType}
+import org.apache.spark.util.Utils
 
 class TriggeredGraphExecutionSuite extends ExecutionTest with SharedSparkSession {
 
@@ -1083,6 +1086,41 @@ class TriggeredGraphExecutionSuite extends ExecutionTest with SharedSparkSession
       currentNumTries = 2,
       maxAllowedRetries = 1)
     TriggeredFailureInfo(ts, numFailures = 2, lastException = cause, lastExceptionAction = action)
+  }
+
+  test("a run fails instead of overwriting a materialized view created by another pipeline") {
+    def pipeline(numRows: Int): DataflowGraph = new TestGraphRegistrationContext(spark) {
+      registerMaterializedView("mv", query = dfFlowFunc(spark.range(numRows).toDF()))
+    }.toDataflowGraph
+    def run(graph: DataflowGraph, storageRoot: String): TestPipelineUpdateContext = {
+      val updateContext = TestPipelineUpdateContext(spark, graph, storageRoot)
+      updateContext.pipelineExecution.runPipeline()
+      updateContext.pipelineExecution.awaitCompletion()
+      updateContext
+    }
+
+    // The first pipeline creates `mv` with ten rows.
+    run(pipeline(10), storageRoot)
+    assert(getTable(fullyQualifiedIdentifier("mv")).count() == 10)
+
+    // A second pipeline, with its own storage root, defines a materialized view of the same name.
+    // Its run fails before anything is written, and the first pipeline's rows survive.
+    val otherStorageRoot = s"file://${Utils.createTempDir().getCanonicalPath}"
+    val second = run(pipeline(3), otherStorageRoot)
+    assertRunProgressEvent(
+      eventBuffer = second.eventBuffer,
+      state = RunState.FAILED,
+      expectedEventLevel = EventLevel.ERROR,
+      errorChecker = _.exists {
+        case TableMaterializationException(_, cause: SparkThrowable) =>
+          cause.getCondition == "PIPELINE_TABLE_OWNED_BY_ANOTHER_PIPELINE"
+        case _ => false
+      })
+    assert(getTable(fullyQualifiedIdentifier("mv")).count() == 10)
+
+    // The first pipeline still runs as before.
+    run(pipeline(10), storageRoot)
+    assert(getTable(fullyQualifiedIdentifier("mv")).count() == 10)
   }
 
   test("chooseRunTerminationReason surfaces the earliest non-retryable failure deterministically") {

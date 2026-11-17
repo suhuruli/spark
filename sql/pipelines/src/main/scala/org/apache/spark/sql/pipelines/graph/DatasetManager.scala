@@ -18,7 +18,10 @@
 package org.apache.spark.sql.pipelines.graph
 
 import scala.jdk.CollectionConverters._
+import scala.util.Try
 import scala.util.control.{NonFatal, NoStackTrace}
+
+import org.apache.hadoop.fs.Path
 
 import org.apache.spark.SparkException
 import org.apache.spark.internal.{Logging, LogKeys}
@@ -104,6 +107,34 @@ object DatasetManager extends Logging {
     val inferredSchemas = resolvedDataflowGraph.inferSchemas(sessionCaseSensitive)
     val auxiliaryTableSpecs = resolvedDataflowGraph.auxiliaryTableSpecs(inferredSchemas)
 
+    // Load every table to materialize once, up front, and reject the run if any of them is about
+    // to be recomputed from scratch while belonging to a different pipeline. Checking all tables
+    // before materializing any of them means a rejected run leaves every table untouched,
+    // including the ones this pipeline does own. The loaded handles are reused by
+    // `materializeTable` below rather than loaded a second time; nothing mutates these tables in
+    // between.
+    val existingTables: Map[TableIdentifier, Option[V2Table]] = tablesToMaterialize.map {
+      case (identifier, _) =>
+        val (catalog, catalogIdentifier) =
+          PipelinesCatalogUtils.resolveTableCatalog(context.spark, identifier)
+        identifier -> loadTableIfExists(catalog, catalogIdentifier)
+    }
+    tablesToMaterialize.values.foreach { case TableRefreshType(table, isFullRefresh) =>
+      existingTables(table.identifier).foreach { existingTable =>
+        if (isRecomputedFromScratch(table, isFullRefresh)) {
+          try {
+            validateTableOwnership(table, existingTable, context)
+          } catch {
+            case NonFatal(e) =>
+              throw TableMaterializationException(
+                table.displayName,
+                cause = e.addOrigin(table.origin)
+              )
+          }
+        }
+      }
+    }
+
     // materialized [[DataflowGraph]] where each table has been materialized and each table
     // has metadata (e.g., normalized table storage path) populated
     val materializedGraph: DataflowGraph = try {
@@ -127,6 +158,7 @@ object DatasetManager extends Logging {
                 val (tableWithMaterializationMetadata, catalogTableEntity) = materializeTable(
                   resolvedDataflowGraph = resolvedDataflowGraph,
                   table = table,
+                  existingTableOpt = existingTables(table.identifier),
                   inferredSchemas = inferredSchemas,
                   isFullRefresh = isFullRefresh,
                   auxiliaryTableSpecOpt = auxiliaryTableSpecOpt,
@@ -294,6 +326,9 @@ object DatasetManager extends Logging {
    * catalog based on the given table and context.
    * @param resolvedDataflowGraph The resolved [[DataflowGraph]] used for table metadata.
    * @param table The table to be materialized.
+   * @param existingTableOpt The already-loaded catalog table at `table`'s identifier, if it exists.
+   *                         Loaded once by the caller, which has already checked that this pipeline
+   *                         may recompute it.
    * @param inferredSchemas The schemas inferred from the resolved graph, keyed by table.
    * @param isFullRefresh Whether this table should be full refreshed or not.
    * @param auxiliaryTableSpecOpt The spec for the auxiliary table (if this table has one)
@@ -307,6 +342,7 @@ object DatasetManager extends Logging {
   private def materializeTable(
       resolvedDataflowGraph: DataflowGraph,
       table: Table,
+      existingTableOpt: Option[V2Table],
       inferredSchemas: Map[TableIdentifier, StructType],
       isFullRefresh: Boolean,
       auxiliaryTableSpecOpt: Option[AuxiliaryTableSpec],
@@ -320,7 +356,23 @@ object DatasetManager extends Logging {
     val outputSchema = table.specifiedSchema.getOrElse(
       inferredSchemas(table.identifier).asNullable
     )
-    val mergedProperties = resolveTableProperties(table, identifier)
+
+    // A streaming table on a non-full-refresh run is maintained incrementally: its existing data is
+    // preserved and its schema is merged with (not replaced by) the schema computed in this run.
+    // Every other case (materialized views, and any full refresh) is recomputed from scratch:
+    // existing data is wiped and the schema is taken directly from this run's computed schema.
+    val isTableIncrementallyUpdated = !isRecomputedFromScratch(table, isFullRefresh)
+
+    // Record which pipeline the table belongs to whenever this pipeline creates it or recomputes it
+    // from scratch; the caller has already rejected the run if it belongs to another pipeline. An
+    // incremental run of a streaming table leaves the recorded owner alone, so several pipelines
+    // can keep appending to a shared streaming table as before.
+    val ownershipProperty = if (existingTableOpt.isEmpty || !isTableIncrementallyUpdated) {
+      Map(PipelinesTableProperties.storageRootProperty -> normalizeStorageRoot(context.storageRoot))
+    } else {
+      Map.empty[String, String]
+    }
+    val mergedProperties = resolveTableProperties(table, identifier) ++ ownershipProperty
     val partitioning = table.partitionCols.toSeq.flatten.map(Expressions.identity)
     val clustering = table.clusterCols.map(cols =>
       ClusterByTransform(cols.map(col => Expressions.column(col)))
@@ -336,8 +388,6 @@ object DatasetManager extends Logging {
 
     val allTransforms = partitioning ++ clustering
 
-    val existingTableOpt = loadTableIfExists(catalog, identifier)
-
     // Error if partitioning/clustering doesn't match
     existingTableOpt.foreach { existingTable =>
       val existingTransforms = existingTable.partitioning().toSeq
@@ -351,12 +401,6 @@ object DatasetManager extends Logging {
         )
       }
     }
-
-    // A streaming table on a non-full-refresh run is maintained incrementally: its existing data is
-    // preserved and its schema is merged with (not replaced by) the schema computed in this run.
-    // Every other case (materialized views, and any full refresh) is recomputed from scratch:
-    // existing data is wiped and the schema is taken directly from this run's computed schema.
-    val isTableIncrementallyUpdated = table.isStreamingTable && !isFullRefresh
 
     // Wipe the data if we need to
     if (existingTableOpt.isDefined && !isTableIncrementallyUpdated) {
@@ -433,6 +477,50 @@ object DatasetManager extends Logging {
       )
 
     (tableWithMaterializationMetadata, catalogTableEntity)
+  }
+
+  /**
+   * Whether materializing `table` in this run discards its existing data and schema: true for a
+   * materialized view and for any full refresh. A streaming table on a non-full-refresh run is
+   * maintained incrementally instead.
+   */
+  private def isRecomputedFromScratch(table: Table, isFullRefresh: Boolean): Boolean = {
+    !table.isStreamingTable || isFullRefresh
+  }
+
+  /**
+   * Rejects recomputing `existingTable` from scratch when it records a pipeline storage root other
+   * than this run's, so one pipeline cannot silently replace a table another pipeline maintains.
+   * A table with no recorded storage root (created by an earlier release, or outside any pipeline)
+   * is not rejected: the pipeline that recomputes it records itself as its owner.
+   */
+  private def validateTableOwnership(
+      table: Table,
+      existingTable: V2Table,
+      context: PipelineUpdateContext): Unit = {
+    val storageRoot = normalizeStorageRoot(context.storageRoot)
+    Option(existingTable.properties().get(PipelinesTableProperties.storageRootProperty))
+      .map(normalizeStorageRoot)
+      .filter(_ != storageRoot)
+      .foreach { recordedStorageRoot =>
+        throw new AnalysisException(
+          errorClass = "PIPELINE_TABLE_OWNED_BY_ANOTHER_PIPELINE",
+          messageParameters = Map(
+            "tableName" -> table.identifier.quotedString,
+            "recordedStorageRoot" -> recordedStorageRoot,
+            "storageRoot" -> storageRoot
+          )
+        )
+      }
+  }
+
+  /**
+   * The form in which a pipeline storage root is recorded on, and compared against, a table:
+   * normalized as a [[Path]] so that spellings of the same location (a trailing slash, `file:///x`
+   * versus `file:/x`) compare equal. A value that is not a valid path is compared as written.
+   */
+  private def normalizeStorageRoot(storageRoot: String): String = {
+    Try(new Path(storageRoot).toString).getOrElse(storageRoot)
   }
 
   /**
