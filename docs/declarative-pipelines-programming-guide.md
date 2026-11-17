@@ -1132,6 +1132,7 @@ When working with sinks, keep the following considerations in mind:
 - The function used to define a dataset must return a `pyspark.sql.DataFrame`.
 - Never use methods that save or write to files or tables as part of your SDP dataset code.
 - When using the `for` loop pattern to define datasets in Python, ensure that the list of values passed to the `for` loop is always additive.
+- `spark.sql()` can run queries and a small set of read-only statements. A statement that creates, changes, or drops a catalog object, writes data, or changes the session is rejected with `UNSUPPORTED_PIPELINE_SPARK_SQL_COMMAND`, whether `spark.sql()` is called at the top level of a definitions file or inside a dataset function. See [`spark.sql()` Statements in Pipeline Code](#sparksql-statements-in-pipeline-code) for the list.
 
 Examples of Spark SQL operations that should never be used in SDP code:
 
@@ -1147,3 +1148,25 @@ Examples of Spark SQL operations that should never be used in SDP code:
 ### SQL Considerations
 
 - The `PIVOT` clause is not supported in SDP SQL.
+
+#### `spark.sql()` Statements in Pipeline Code
+
+When `spark-pipelines run` or `spark-pipelines dry-run` loads the Python definitions files of a pipeline, every `spark.sql()` call is checked before it runs. The check covers calls at the top level of a file and calls inside dataset and flow functions. A rejected call fails the run with `UNSUPPORTED_PIPELINE_SPARK_SQL_COMMAND` (SQLSTATE `0A000`). The message names the kind of plan the statement was parsed into, such as `CreateTable`, not the statement text.
+
+The following statements are rejected:
+
+- Statements that create, alter, or drop catalog objects, such as `CREATE TABLE`, `CREATE VIEW`, `CREATE TEMPORARY VIEW`, `ALTER TABLE ... RENAME TO`, `DROP TABLE`, `DROP VIEW`, `CREATE NAMESPACE`, and `CREATE FUNCTION`. This includes `CREATE MATERIALIZED VIEW` and `CREATE STREAMING TABLE`, which belong in SQL definitions files, not in `spark.sql()`.
+- Statements that write data, such as `INSERT INTO`, `INSERT OVERWRITE`, `INSERT OVERWRITE DIRECTORY`, `MERGE INTO`, `UPDATE`, and `DELETE FROM`.
+- Statements that change the session, such as `SET`, `RESET`, `USE`, and `SET CATALOG`.
+- `CALL` and `EXECUTE IMMEDIATE`, which run a procedure or an arbitrary SQL string while the statement is analyzed.
+- Every other statement that Spark runs as a command rather than as a query, for example `EXPLAIN`, `CACHE TABLE`, `REFRESH TABLE`, `ANALYZE TABLE`, `SHOW PARTITIONS`, `DESCRIBE FUNCTION`, and `DESCRIBE QUERY`. Only the read-only statements listed below are exempt.
+
+Prefixing a rejected statement with a common table expression (`WITH ... INSERT INTO ...`), writing it as a multi-insert (`FROM ... INSERT INTO ... INSERT INTO ...`), or naming its target with an `IDENTIFIER(...)` clause does not get it past the check.
+
+The following statements are allowed:
+
+- Queries, such as `SELECT`, `TABLE`, `WITH ... SELECT`, and set operations such as `UNION ALL`.
+- `DESCRIBE TABLE`, including the `PARTITION (...)` form. Describing a single column (`DESCRIBE TABLE t col`) is rejected.
+- `SHOW TABLES`, `SHOW VIEWS`, `SHOW COLUMNS`, `SHOW TBLPROPERTIES`, `SHOW CREATE TABLE`, `SHOW FUNCTIONS`, `SHOW NAMESPACES` (also spelled `SHOW DATABASES` or `SHOW SCHEMAS`), and `SHOW CATALOGS`.
+
+The check is best-effort. It classifies a statement by the plan the parser produces for it, so do not rely on it to catch every statement with side effects. Keep such statements out of pipeline code and treat the allowed list above as the supported surface.
