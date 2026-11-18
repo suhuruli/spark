@@ -83,8 +83,8 @@ A YAML-formatted pipeline spec file contains the top-level configuration for the
 - **name** (Required) - The name of the pipeline project.
 - **libraries** (Required) - The paths with the transformation source files in SQL or Python.
 - **storage** (Required) – A directory where checkpoints can be stored for streaming tables within the pipeline.
-- **database** (Optional) - The default target database for pipeline outputs. **schema** can alternatively be used as an alias.
-- **catalog** (Optional) - The default target catalog for pipeline outputs.
+- **database** (Optional) - The default target database for pipeline outputs. It must already exist before the pipeline runs (see below). **schema** can alternatively be used as an alias.
+- **catalog** (Optional) - The default target catalog for pipeline outputs. It must be registered on the Spark Connect server the pipeline runs against (see below).
 - **configuration** (Optional) - Map of Spark configuration properties.
 
 An example pipeline spec file:
@@ -100,6 +100,14 @@ database: my_db
 configuration:
   spark.sql.shuffle.partitions: "1000"
 ```
+
+The catalog and database named in a spec must exist before the pipeline runs. `spark-pipelines run` writes the pipeline's outputs into them but does not create either one: the catalog must be registered on the Spark Connect server the pipeline runs against (through `spark.sql.catalog.my_catalog` for a catalog plugin), and the database must already exist in that catalog. Otherwise the run stops while creating the dataflow graph, before any dataset is registered, with `CATALOG_NOT_FOUND` or `SCHEMA_NOT_FOUND`. The error names the missing catalog or schema but does not point at the spec. Create the database once, before the first run, from a session connected to the same server, for example `pyspark --remote sc://localhost:15002`:
+
+```sql
+CREATE NAMESPACE IF NOT EXISTS my_catalog.my_db;
+```
+
+If `catalog` and `database` are omitted, the outputs go to the session's current catalog and database. Unless the server's configuration changes them, those are `spark_catalog` and its `default` database, which exist without any setup.
 
 The `spark-pipelines init` command, described below, makes it easy to generate a pipeline project with default configuration and directory structure.
 
@@ -705,7 +713,7 @@ spark-pipelines init --name cdc_demo
 cd cdc_demo
 ```
 
-`spark-pipelines init` seeds `transformations/` with `example_python_materialized_view.py` and `example_sql_materialized_view.sql`. Delete them so only the CDC datasets run, then edit `spark-pipeline.yml` to add the catalog as shown in [Choosing a Target Format](#choosing-a-target-format), and put the following in `transformations/customers_cdc.py`:
+`spark-pipelines init` seeds `transformations/` with `example_python_materialized_view.py` and `example_sql_materialized_view.sql`. Delete them so only the CDC datasets run, edit `spark-pipeline.yml` to add the catalog as shown in [Choosing a Target Format](#choosing-a-target-format), create the `cdc_demo` database in that catalog if it does not exist yet (`CREATE NAMESPACE IF NOT EXISTS lakehouse.cdc_demo`, see [Pipeline Projects](#pipeline-projects)), and put the following in `transformations/customers_cdc.py`:
 
 ```python
 from pyspark import pipelines as dp
