@@ -26,8 +26,9 @@ import org.apache.spark.connect.proto.{Expression, OutputType, PipelineCommand, 
 import org.apache.spark.connect.proto.PipelineCommand.{DefineFlow, DefineOutput}
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.connect.service.{SessionKey, SparkConnectService}
+import org.apache.spark.sql.connector.catalog.InMemoryCatalog
 import org.apache.spark.sql.pipelines.autocdc.{ColumnSelection, UnqualifiedColumnName}
-import org.apache.spark.sql.pipelines.graph.AutoCdcFlow
+import org.apache.spark.sql.pipelines.graph.{AutoCdcFlow, GraphRegistrationContext}
 
 class SparkDeclarativePipelinesServerSuite
     extends SparkDeclarativePipelinesServerTest
@@ -53,6 +54,87 @@ class SparkDeclarativePipelinesServerSuite
       val definition =
         getDefaultSessionHolder.dataflowGraphRegistry.getDataflowGraphOrThrow(graphId)
       assert(definition.defaultDatabase == "test_db")
+    }
+  }
+
+  /**
+   * Registers a v2 catalog that keeps `CatalogPlugin.defaultNamespace()`, which is empty, so a
+   * session that switches to it has no current database.
+   */
+  private def registerCatalogWithoutDefaultNamespace(catalogName: String)(implicit
+      stub: proto.SparkConnectServiceGrpc.SparkConnectServiceBlockingStub): Unit = {
+    sendPlan(
+      buildSqlCommandPlan(
+        s"SET spark.sql.catalog.$catalogName=${classOf[InMemoryCatalog].getName}"))
+  }
+
+  private def createDataflowGraphAndGetDefinition(
+      cmd: proto.PipelineCommand.CreateDataflowGraph)(implicit
+      stub: proto.SparkConnectServiceGrpc.SparkConnectServiceBlockingStub)
+      : GraphRegistrationContext = {
+    val graphId = sendPlan(
+      buildCreateDataflowGraphPlan(
+        cmd)).getPipelineCommandResult.getCreateDataflowGraphResult.getDataflowGraphId
+    getDefaultSessionHolder.dataflowGraphRegistry.getDataflowGraphOrThrow(graphId)
+  }
+
+  gridTest(
+    "create dataflow graph fails when no default database can be resolved")(
+    Seq(None, Some(""))) { database =>
+    withRawBlockingStub { implicit stub =>
+      registerCatalogWithoutDefaultNamespace("testcat")
+      sendPlan(buildSqlCommandPlan("SET CATALOG testcat"))
+      val cmd = proto.PipelineCommand.CreateDataflowGraph.newBuilder()
+      database.foreach(cmd.setDefaultDatabase)
+      val ex = intercept[Exception] {
+        sendPlan(buildCreateDataflowGraphPlan(cmd.build()))
+      }
+      assert(ex.getMessage.contains("PIPELINE_MISSING_DEFAULT_DATABASE"))
+      assert(ex.getMessage.contains("`testcat`"))
+      assert(ex.getMessage.contains("`database`"))
+    }
+  }
+
+  gridTest("failed create dataflow graph restores the session's catalog and database")(
+    // No database: the new error. A database that does not exist: SCHEMA_NOT_FOUND.
+    Seq(None, Some("missing_db"))) { database =>
+    withRawBlockingStub { implicit stub =>
+      registerCatalogWithoutDefaultNamespace("testcat")
+      sendPlan(buildSqlCommandPlan("CREATE DATABASE test_db"))
+      sendPlan(buildSqlCommandPlan("USE DATABASE test_db"))
+      val cmd = proto.PipelineCommand.CreateDataflowGraph.newBuilder()
+      cmd.setDefaultCatalog("testcat")
+      database.foreach(cmd.setDefaultDatabase)
+      intercept[Exception] {
+        sendPlan(buildCreateDataflowGraphPlan(cmd.build()))
+      }
+      val catalog = getDefaultSessionHolder.session.catalog
+      assert(catalog.currentCatalog() == "spark_catalog")
+      assert(catalog.currentDatabase == "test_db")
+    }
+  }
+
+  test("create dataflow graph falls back to current database when command database is empty") {
+    withRawBlockingStub { implicit stub =>
+      val definition = createDataflowGraphAndGetDefinition(
+        proto.PipelineCommand.CreateDataflowGraph.newBuilder().setDefaultDatabase("").build())
+      assert(definition.defaultDatabase == "default")
+    }
+  }
+
+  test("create dataflow graph falls back to current database of the command catalog") {
+    withRawBlockingStub { implicit stub =>
+      registerCatalogWithoutDefaultNamespace("testcat")
+      sendPlan(buildSqlCommandPlan("CREATE NAMESPACE testcat.test_ns"))
+      sendPlan(buildSqlCommandPlan("USE testcat.test_ns"))
+      val definition = createDataflowGraphAndGetDefinition(
+        proto.PipelineCommand.CreateDataflowGraph
+          .newBuilder()
+          .setDefaultCatalog("spark_catalog")
+          .build())
+      assert(definition.defaultCatalog == "spark_catalog")
+      assert(definition.defaultDatabase == "default")
+      assert(getDefaultSessionHolder.session.catalog.currentDatabase == "default")
     }
   }
 

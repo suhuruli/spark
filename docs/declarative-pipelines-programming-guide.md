@@ -83,8 +83,8 @@ A YAML-formatted pipeline spec file contains the top-level configuration for the
 - **name** (Required) - The name of the pipeline project.
 - **libraries** (Required) - The paths with the transformation source files in SQL or Python.
 - **storage** (Required) – A directory where checkpoints can be stored for streaming tables within the pipeline.
-- **database** (Optional) - The default target database for pipeline outputs. **schema** can alternatively be used as an alias.
-- **catalog** (Optional) - The default target catalog for pipeline outputs.
+- **database** (Optional) - The default target database for pipeline outputs. **schema** can alternatively be used as an alias. When it is omitted or empty, the current database of the pipeline's catalog is used. It is required when that catalog has no current database, as is the case for a catalog that defines no default namespace.
+- **catalog** (Optional) - The default target catalog for pipeline outputs. When it is omitted, the session's current catalog is used.
 - **configuration** (Optional) - Map of Spark configuration properties.
 
 An example pipeline spec file:

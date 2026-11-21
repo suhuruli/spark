@@ -19,6 +19,7 @@ package org.apache.spark.sql.connect.pipelines
 
 import scala.jdk.CollectionConverters._
 import scala.util.Using
+import scala.util.control.NonFatal
 
 import io.grpc.stub.StreamObserver
 
@@ -36,6 +37,7 @@ import org.apache.spark.sql.catalyst.plans.logical.{Command, CreateNamespace, Cr
 import org.apache.spark.sql.classic.ClassicConversions._
 import org.apache.spark.sql.connect.common.DataTypeProtoConverter
 import org.apache.spark.sql.connect.service.SessionHolder
+import org.apache.spark.sql.errors.DataTypeErrors.toSQLId
 import org.apache.spark.sql.execution.command.{ShowCatalogsCommand, ShowNamespacesCommand}
 import org.apache.spark.sql.pipelines.Language.Python
 import org.apache.spark.sql.pipelines.autocdc.{ChangeArgs, ColumnSelection, ScdType, UnqualifiedColumnName}
@@ -207,35 +209,59 @@ private[connect] object PipelinesHandler extends Logging {
   private def createDataflowGraph(
       cmd: proto.PipelineCommand.CreateDataflowGraph,
       sessionHolder: SessionHolder): String = {
+    val catalog = sessionHolder.session.catalog
+    val previousCatalog = catalog.currentCatalog()
+    val previousDatabase = catalog.currentDatabase
     val defaultCatalog = Option
       .when(cmd.hasDefaultCatalog)(cmd.getDefaultCatalog)
       .getOrElse {
-        val currentCatalog = sessionHolder.session.catalog.currentCatalog()
         logInfo(
           log"No default catalog was supplied. " +
-            log"Falling back to the current catalog: ${MDC(CATALOG_NAME, currentCatalog)}.")
-        currentCatalog
+            log"Falling back to the current catalog: ${MDC(CATALOG_NAME, previousCatalog)}.")
+        previousCatalog
       }
 
-    val defaultDatabase = Option
-      .when(cmd.hasDefaultDatabase)(cmd.getDefaultDatabase)
-      .getOrElse {
-        val currentDatabase = sessionHolder.session.catalog.currentDatabase
-        logInfo(
-          log"No default database was supplied. " +
-            log"Falling back to the current database: ${MDC(DATABASE_NAME, currentDatabase)}.")
-        currentDatabase
-      }
+    // Switch catalogs before resolving the default database: the current database changes
+    // with the catalog, so reading it earlier would return the one of the previous catalog.
+    catalog.setCurrentCatalog(defaultCatalog)
+    try {
+      val defaultDatabase = Option
+        .when(cmd.hasDefaultDatabase && cmd.getDefaultDatabase.nonEmpty)(cmd.getDefaultDatabase)
+        .getOrElse {
+          val currentDatabase = catalog.currentDatabase
+          // A catalog that does not define a default namespace has no current database until
+          // the session selects one.
+          if (currentDatabase.isEmpty) {
+            throw new AnalysisException(
+              "PIPELINE_MISSING_DEFAULT_DATABASE",
+              Map("catalogName" -> toSQLId(Seq(defaultCatalog))))
+          }
+          logInfo(
+            log"No default database was supplied. " +
+              log"Falling back to the current database: ${MDC(DATABASE_NAME, currentDatabase)}.")
+          currentDatabase
+        }
+      catalog.setCurrentDatabase(defaultDatabase)
 
-    val defaultSqlConf = cmd.getSqlConfMap.asScala.toMap
-
-    sessionHolder.session.catalog.setCurrentCatalog(defaultCatalog)
-    sessionHolder.session.catalog.setCurrentDatabase(defaultDatabase)
-
-    sessionHolder.dataflowGraphRegistry.createDataflowGraph(
-      defaultCatalog = defaultCatalog,
-      defaultDatabase = defaultDatabase,
-      defaultSqlConf = defaultSqlConf)
+      sessionHolder.dataflowGraphRegistry.createDataflowGraph(
+        defaultCatalog = defaultCatalog,
+        defaultDatabase = defaultDatabase,
+        defaultSqlConf = cmd.getSqlConfMap.asScala.toMap)
+    } catch {
+      case NonFatal(e) =>
+        // A failed command must not leave the session on the pipeline's catalog. Switching
+        // catalogs resets the current database, so the previous one is set again as well. An
+        // empty previous database cannot be set back, so the database is kept in that case.
+        try {
+          catalog.setCurrentCatalog(previousCatalog)
+          if (previousDatabase.nonEmpty) {
+            catalog.setCurrentDatabase(previousDatabase)
+          }
+        } catch {
+          case NonFatal(restoreError) => e.addSuppressed(restoreError)
+        }
+        throw e
+    }
   }
 
   private def defineSqlGraphElements(

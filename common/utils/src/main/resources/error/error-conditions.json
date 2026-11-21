@@ -7366,6 +7366,12 @@
     ],
     "sqlState" : "0A000"
   },
+  "PIPELINE_MISSING_DEFAULT_DATABASE" : {
+    "message" : [
+      "Cannot determine the default database: the pipeline does not set one and catalog <catalogName> has no current database. Set the `database` field of the pipeline spec."
+    ],
+    "sqlState" : "3F000"
+  },
   "PIPELINE_NESTED_COMPLEX_TYPE_SCHEMA_EVOLUTION_UNSUPPORTED" : {
     "message" : [
       "Schema evolution within a complex type (array or map) whose element is itself a complex type is not supported.",

@@ -30,6 +30,7 @@ license: |
 ## Upgrading from Spark SQL 4.4 to 4.5
 
 - Since Spark 4.5, `LIST FILES`, `LIST JARS` and `LIST ARCHIVES` in a session whose artifacts are isolated list the files, jars and archives added to the session and those added to the `SparkContext` outside of any session, such as with `--files`, `--jars` and `--archives`, but no longer those added by the other sessions, such as with `ADD FILE` or `SparkSession.addArtifact`. Previously, they listed those of every session. Artifacts are isolated by default, and always in the sessions of a Spark Connect server. Spark does not isolate them in `spark-shell`, in PySpark when PySpark creates the `SparkContext`, or in Scala and Java sessions whose builder enables Hive support, such as with `enableHiveSupport()`, so those sessions still list all of them. `SparkContext.listFiles`, `SparkContext.listJars` and `SparkContext.listArchives` are unchanged. To restore the previous behavior, set `spark.sql.legacy.listAllSessionsResources` to `true`.
+- Since Spark 4.5, a [Declarative Pipelines](declarative-pipelines-programming-guide.html) spec that sets `catalog` but not `database` uses the current database of that catalog as the pipeline's default database. Previously it used the current database of the catalog the session was in before the pipeline started. To use the previous database instead, set the `database` field of the pipeline spec to that name.
 
 ## Upgrading from Spark SQL 4.3 to 4.4
 
