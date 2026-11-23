@@ -82,10 +82,12 @@ A YAML-formatted pipeline spec file contains the top-level configuration for the
 
 - **name** (Required) - The name of the pipeline project.
 - **libraries** (Required) - The paths with the transformation source files in SQL or Python.
-- **storage** (Required) – A directory where checkpoints can be stored for streaming tables within the pipeline.
+- **storage** (Required) – The URI of a directory that holds pipeline metadata and streaming checkpoints. Use a location that survives restarts of the machine or server that runs the pipeline, such as cloud storage or a mounted volume.
 - **database** (Optional) - The default target database for pipeline outputs. **schema** can alternatively be used as an alias.
 - **catalog** (Optional) - The default target catalog for pipeline outputs.
 - **configuration** (Optional) - Map of Spark configuration properties.
+
+If the storage directory is lost, for example because a container's local disk is replaced on restart, the next run still succeeds, but streaming tables read their sources again from the beginning. A Delta table can then receive duplicate rows, and a Parquet table skips rows that arrived since the last run.
 
 An example pipeline spec file:
 
@@ -94,6 +96,7 @@ name: my_pipeline
 libraries:
   - glob:
       include: transformations/**
+# Placeholder. A file:// path exists only on one machine; use durable storage, see `storage` above.
 storage: file:///absolute/path/to/storage/dir
 catalog: my_catalog
 database: my_db
