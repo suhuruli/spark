@@ -178,11 +178,21 @@ def unpack_pipeline_spec(spec_data: Mapping[str, Any]) -> PipelineSpec:
                 messageParameters={"field_name": key},
             )
 
+    # Picking one of two conflicting values silently would put outputs in a schema the user
+    # did not ask for.
+    database = spec_data.get("database")
+    schema = spec_data.get("schema")
+    if database is not None and schema is not None and database != schema:
+        raise PySparkException(
+            errorClass="PIPELINE_SPEC_CONFLICTING_DATABASE_AND_SCHEMA",
+            messageParameters={"database": str(database), "schema": str(schema)},
+        )
+
     return PipelineSpec(
         name=spec_data["name"],
         storage=spec_data["storage"],
         catalog=spec_data.get("catalog"),
-        database=spec_data.get("database", spec_data.get("schema")),
+        database=database if database is not None else schema,
         configuration=validate_str_dict(spec_data.get("configuration", {}), "configuration"),
         libraries=[
             LibrariesGlob(include=entry["glob"]["include"])

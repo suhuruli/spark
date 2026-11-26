@@ -123,6 +123,27 @@ class CLIUtilityTests(ReusedConnectTestCase):
             assert len(spec.libraries) == 1
             assert spec.libraries[0].include == "test_include"
 
+    def test_unpack_pipeline_spec_database_and_schema(self):
+        base = {"name": "test_pipeline", "storage": "storage_path"}
+        accepted = [
+            ({"database": "a_db"}, "a_db"),
+            ({"schema": "b_schema"}, "b_schema"),
+            ({"database": "a_db", "schema": "a_db"}, "a_db"),
+            ({"database": None, "schema": "b_schema"}, "b_schema"),
+        ]
+        for fields, expected in accepted:
+            with self.subTest(fields=fields):
+                self.assertEqual(unpack_pipeline_spec({**base, **fields}).database, expected)
+
+        with self.assertRaises(PySparkException) as context:
+            unpack_pipeline_spec({**base, "database": "a_db", "schema": "b_schema"})
+        self.assertEqual(
+            context.exception.getCondition(), "PIPELINE_SPEC_CONFLICTING_DATABASE_AND_SCHEMA"
+        )
+        self.assertEqual(
+            context.exception.getMessageParameters(), {"database": "a_db", "schema": "b_schema"}
+        )
+
     def test_load_pipeline_spec_invalid(self):
         with tempfile.NamedTemporaryFile(mode="w") as tmpfile:
             tmpfile.write("""

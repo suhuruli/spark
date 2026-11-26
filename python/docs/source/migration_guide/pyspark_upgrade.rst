@@ -19,6 +19,10 @@
 Upgrading PySpark
 ==================
 
+Upgrading from PySpark 4.5 to 5.0
+---------------------------------
+* In Spark 5.0, a pipeline spec that sets ``database`` and ``schema`` to different values fails instead of silently ignoring ``schema``. Keep one of the two fields.
+
 Upgrading from PySpark 4.2 to 4.3
 ---------------------------------
 * In Spark 4.3, Python 3.10 support was dropped in PySpark.
